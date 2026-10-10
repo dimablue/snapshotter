@@ -3,7 +3,7 @@
 
     python gazesnap.py --source mouse            # cursor = gaze, Enter in this terminal = snap
     python gazesnap.py --source webcam --narrate # real blinks from the laptop camera
-    python gazesnap.py --source neon --narrate   # Pupil Labs Neon eye tracker
+    python gazesnap.py --source neon --narrate   # Pupil Labs Neon over USB via Pupil Capture
 
 Terminal commands while running (type, then Enter):
     (empty)  snap now      +/-  resize box      p  pause/resume
@@ -22,13 +22,15 @@ from PyQt6.QtGui import QCursor, QImage
 from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit
 
 from capture import grab_region, play_shutter
-from core import BlinkDetector, BoxTracker, GazeFilter
+from core import BlinkDetector, BoxTracker, GazeFilter, CropSelector
 from overlay import Overlay, DragHandle, ResizeHandle
 from sources import SOURCE_NAMES, get_source_class
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--selection", choices=["box", "crop"], default="box")
+    p.add_argument("--dwell-ms", type=int, default=800)
     p.add_argument("--source", choices=SOURCE_NAMES, default="mouse")
     p.add_argument("--narrate", action="store_true", help="describe each snap with Claude and speak it")
     p.add_argument("--model", default="claude-opus-5-5", help="Claude model for narration")
@@ -53,20 +55,28 @@ def parse_args():
     # webcam
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--ear-ratio", type=float, default=0.7, help="eye closed below this x open-eye EAR")
-    # neon
+    # neon (both)
+    p.add_argument("--flip-y", action="store_true", help="use if the box moves opposite to your gaze vertically")
+    p.add_argument("--marker-size", type=int, default=120)
+    # neon via Pupil Capture (USB)
+    p.add_argument("--pupil-host", default="127.0.0.1", help="machine running Pupil Capture")
+    p.add_argument("--pupil-port", type=int, default=50020, help="Pupil Remote port in Pupil Capture")
+    p.add_argument("--surface", default="screen", help="surface name in Pupil Capture's Surface Tracker")
+    p.add_argument("--min-confidence", type=float, default=0.6, help="drop gaze below this confidence")
+    p.add_argument("--blink-confidence", type=float, default=0.3,
+                   help="eye counts as closed below this pupil confidence")
+    # neon via Companion app (Android)
     p.add_argument("--neon-ip", default=None, help="skip discovery; IP shown in the Companion app")
     p.add_argument("--neon-port", type=int, default=8080)
     p.add_argument("--blink-mode", choices=["auto", "eyelid", "events"], default="auto")
     p.add_argument("--eyelid-ratio", type=float, default=0.4, help="closed below this x open aperture")
-    p.add_argument("--flip-y", action="store_true", help="use if the box moves opposite to your gaze vertically")
-    p.add_argument("--marker-size", type=int, default=120)
     return p.parse_args()
 
 
 class GazeSnapApp:
     def __init__(self, args):
         self.args = args
-        self.app = QApplication(sys.argv)
+        self.app = QApplication.instance() or QApplication(sys.argv)
         screen = self.app.primaryScreen()
         geom = screen.geometry()
         self.screen_w, self.screen_h = geom.width(), geom.height()
@@ -82,7 +92,7 @@ class GazeSnapApp:
 
         self.filter = GazeFilter(args.min_cutoff, args.beta)
         self.tracker = BoxTracker(self.screen_w, self.screen_h, *args.box)
-        self.manual = (args.position or ("follow" if args.source == "neon" else "manual")) == "manual"
+        self.manual = (args.position or ("follow" if args.source.startswith("neon") else "manual")) == "manual"
         self.handle = DragHandle()
         self.handle.moved.connect(self.move_box)
         self.resize_handle = ResizeHandle()
@@ -95,6 +105,10 @@ class GazeSnapApp:
         if args.narrate:
             self._make_narrator()
 
+        self.crop = CropSelector(self.screen_w, self.screen_h, max(200, args.dwell_ms))
+        self.crop_active = args.selection == "crop"
+        self.last_gaze = None
+        self.overlay.crop = self.crop if self.crop_active else None
         self.paused = False
         self.snapping = False
         self.timer = QTimer()
@@ -112,11 +126,14 @@ class GazeSnapApp:
 
     def toggle_voice(self):
         if self.voice_control is not None:
+            was_alive = self.voice_control.alive
             self.voice_control.stop()
             self.voice_control = None
-            self.overlay.voice_status = "Voice off • type v + Enter to enable ElevenLabs"
-            self.log("ElevenLabs microphone off")
-            return
+            if was_alive:
+                self.overlay.voice_status = "Voice off • type v + Enter to enable ElevenLabs"
+                self.log("ElevenLabs microphone off")
+                return
+            # voice had already stopped (e.g. rejected key): start it again
         if not os.environ.get("ELEVENLABS_API_KEY"):
             key, accepted = QInputDialog.getText(
                 None, "Enable ElevenLabs voice commands",
@@ -163,9 +180,12 @@ class GazeSnapApp:
                 fx, fy = self.filter(x, y, t)
                 if not self.manual:
                     self.tracker.update(fx, fy, t)
+                self.last_gaze = t
+                if self.crop_active and not self.paused and not self.snapping and time.monotonic() - t <= 0.25:
+                    self.crop.update(fx, fy, t)
             elif kind == "blink":
                 _, t0, t1 = ev
-                if not self.paused and not self.args.no_blink_capture:
+                if not self.paused and not self.args.no_blink_capture and not self.crop_active:
                     start = self.detector.on_blink(t0, t1)
                     if start is not None:
                         self.snap(self.tracker.rect_before(start))
@@ -174,26 +194,46 @@ class GazeSnapApp:
             elif kind == "cmd":
                 self.command(ev[1])
 
+        if self.crop_active and (self.last_gaze is None or time.monotonic() - self.last_gaze > 0.25):
+            self.crop.clear_dwell()
         self.overlay.box = self.tracker.current_rect()
         self.overlay.gaze = (self.tracker.x, self.tracker.y)
         self.overlay.stable = self.tracker.stable
         self.overlay.paused = self.paused
         left, top, width, height = self.overlay.box
+        show_handles = self.manual and not self.paused and not self.snapping and not self.crop_active
         self.handle.move(left, top)
-        self.handle.setVisible(self.manual and not self.paused and not self.snapping)
+        self.handle.setVisible(show_handles)
         self.resize_handle.move(left + width - 26, top + height - 26)
-        self.resize_handle.setVisible(self.manual and not self.paused and not self.snapping)
+        self.resize_handle.setVisible(show_handles)
         self.overlay.update()
 
     def command(self, cmd):
         if cmd == "":
-            self.snap(self.tracker.current_rect())
+            if self.crop_active:
+                if self.crop.state == "preview":
+                    self.crop.state = "done"
+                    self.snap(self.crop.rect)
+                else:
+                    self.log("crop: hold on both corners first")
+            else:
+                self.snap(self.tracker.current_rect())
+        elif cmd == "c" or (cmd == "cancel" and self.crop_active):
+            self.crop_active = not self.crop_active
+            self.crop.reset()
+            self.overlay.crop = self.crop if self.crop_active else None
+            self.log("crop mode" if self.crop_active else "box mode")
+        elif cmd == "r" and self.crop_active:
+            self.crop.reset()
+        elif cmd in ("r", "cancel"):
+            pass  # crop-only voice commands; ignore in box mode
         elif cmd in ("+", "="):
             self.tracker.resize(1.2)
         elif cmd == "-":
             self.tracker.resize(1 / 1.2)
         elif cmd == "p":
             self.paused = not self.paused
+            self.crop.clear_dwell()
             self.log("paused" if self.paused else "resumed")
         elif cmd == "m":
             self.manual = not self.manual
@@ -210,7 +250,8 @@ class GazeSnapApp:
         elif cmd == "q":
             self.app.quit()
         else:
-            print("commands: Enter=snap  +/-=resize  p=pause  m=manual/follow  v=voice  n=narration  q=quit", flush=True)
+            print("commands: Enter=snap/save preview  c=crop toggle  r=retry  +/-=resize  p=pause  "
+                  "m=manual/follow  v=voice  n=narration  q=quit", flush=True)
 
     # --- capture ----------------------------------------------------------------
     def snap(self, rect):
@@ -233,7 +274,11 @@ class GazeSnapApp:
         self.overlay.hidden_for_capture = False
         self.snapping = False
         if not path:
+            if self.crop_active:
+                self.crop.state = "preview"
             return
+        if self.crop_active:
+            self.crop.reset()
         if not self.args.no_sound:
             play_shutter()
         self.overlay.flash(rect)

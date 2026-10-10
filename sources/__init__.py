@@ -10,9 +10,12 @@ def get_source_class(name):
         from .webcam import WebcamSource
         return WebcamSource
     if name == "neon":
+        from .pupil_capture import PupilCaptureSource
+        return PupilCaptureSource
+    if name == "neon-companion":
         from .neon import NeonSource
         return NeonSource
     raise ValueError(f"unknown source {name!r}")
 
 
-SOURCE_NAMES = ["mouse", "webcam", "neon"]
+SOURCE_NAMES = ["mouse", "webcam", "neon", "neon-companion"]

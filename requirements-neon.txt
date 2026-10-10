@@ -1,2 +1,4 @@
 pupil-labs-realtime-api>=1.9
 git+https://github.com/pupil-labs/real-time-screen-gaze.git
+pyzmq>=25
+msgpack>=1.0

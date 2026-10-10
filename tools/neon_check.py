@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run this first at the lab: finds the Neon, then reports gaze rate and which blink signals arrive.
+"""Companion app (Android) check: finds the Neon, then reports gaze rate and which blink signals arrive.
 
     python tools/neon_check.py [--ip 192.168.x.x] [--seconds 10]
 
@@ -58,7 +58,7 @@ def main():
     if apertures:
         print(f"eyelid aperture mm: min {min(apertures):.1f}, median {sorted(apertures)[len(apertures)//2]:.1f}, "
               f"max {max(apertures):.1f}")
-    print("\nNext: python gazesnap.py --source neon" + (f" --neon-ip {a.ip}" if a.ip else ""))
+    print("\nNext: python gazesnap.py --source neon-companion" + (f" --neon-ip {a.ip}" if a.ip else ""))
 
 
 if __name__ == "__main__":

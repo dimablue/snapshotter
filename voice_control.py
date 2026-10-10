@@ -8,14 +8,32 @@ import threading
 import time
 
 
-def is_capture_command(text):
+CAPTURE = {"take a screenshot", "take a screenshot please", "please take a screenshot",
+           "capture this", "capture this please", "screenshot", "snap now"}
+RETRY = {"retry", "try again", "redo", "start over"}
+CANCEL = {"cancel", "cancel crop"}
+
+
+def voice_command(text):
+    """App command for an utterance: "" snap/save, "r" retry crop, "cancel", or None."""
     # Exact utterances avoid triggering on negations or discussion of screenshots.
     words = re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
     normalized = " ".join(words)
-    return normalized in {
-        "take a screenshot", "take a screenshot please", "please take a screenshot",
-        "capture this", "capture this please", "screenshot", "snap now",
-    }
+    if normalized in CAPTURE:
+        return ""
+    if normalized in RETRY:
+        return "r"
+    if normalized in CANCEL:
+        return "cancel"
+    return None
+
+
+def is_capture_command(text):
+    return voice_command(text) == ""
+
+
+class VoiceError(RuntimeError):
+    """An ElevenLabs error whose message is safe and useful to show as-is."""
 
 
 class VoiceControl:
@@ -35,12 +53,25 @@ class VoiceControl:
             self.status('listening — say “take a screenshot”')
         elif kind == "committed_transcript":
             now = time.monotonic()
-            if is_capture_command(message.get("text", "")) and now - self.last_capture >= 1.5:
+            text = message.get("text", "").strip()
+            cmd = voice_command(text)
+            if text:
+                self.status(f"heard “{text}”" + ("" if cmd is not None else " (not a command)"))
+            if cmd is not None and now - self.last_capture >= 1.5:
                 self.last_capture = now
-                self.events.put(("cmd", ""))
+                self.events.put(("cmd", cmd))
+        elif kind == "auth_error":
+            # Forget the rejected key so `v` asks for a new one.
+            os.environ.pop("ELEVENLABS_API_KEY", None)
+            raise VoiceError("ElevenLabs rejected the API key. Type v + Enter to enter another "
+                             "(it needs Speech to Text access)")
         elif kind == "error" or kind.endswith("_error"):
             # Do not log arbitrary remote payloads or credentials.
-            raise RuntimeError(f"ElevenLabs {kind}; check your key, quota and account access")
+            raise VoiceError(f"ElevenLabs {kind}; check your key, quota and account access")
+
+    @property
+    def alive(self):
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self):
         self._thread = threading.Thread(target=self.run, name="voice-control", daemon=True)
@@ -103,6 +134,9 @@ class VoiceControl:
                             self.handle_message(json.loads(message))
         except ImportError:
             self.status("off — install requirements-voice.txt")
+        except VoiceError as exc:
+            if not self._stop.is_set():
+                self.status(f"off — {exc}")
         except Exception as exc:
             if not self._stop.is_set():
                 self.status(f"off ({type(exc).__name__}); check microphone permission, network, API key and quota")

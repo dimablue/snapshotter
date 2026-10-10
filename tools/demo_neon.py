@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Demo `--source neon` without the headset: plays a scripted gaze session through a
+stand-in for Pupil Capture's network API, and starts GazeSnap connected to it.
+
+    python tools/demo_neon.py                 # dwell crop: corner, opposite corner, voice "take a screenshot"
+    python tools/demo_neon.py --scenario box  # box follows gaze; long blink, double blink
+
+Voice commands are simulated: the demo sends GazeSnap the same command the microphone would.
+Extra arguments go to gazesnap.py, e.g. `python tools/demo_neon.py --no-sound`.
+"""
+import argparse
+import math
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import msgpack
+import zmq
+from PyQt6.QtWidgets import QApplication
+
+ROOT = Path(__file__).resolve().parents[1]
+CLOCK = 1000.0  # stand-in Pupil clock = monotonic + 1000, so the offset sync is exercised
+
+
+def lerp(p, q, k):
+    k = max(0.0, min(1.0, k))
+    k = k * k * (3 - 2 * k)  # ease in/out like a saccade settling
+    return p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k
+
+
+def crop_script(W, H):
+    """Hold corner A, hold corner B, say "retry"; again, then say "take a screenshot"."""
+    a, b = (0.30 * W, 0.28 * H), (0.62 * W, 0.62 * H)
+    a2, b2 = (0.22 * W, 0.35 * H), (0.55 * W, 0.7 * H)
+
+    def wander(s):
+        u = s / 2.5 * 2 * math.pi
+        return 0.5 * W + 0.25 * W * math.sin(u), 0.5 * H + 0.2 * H * math.sin(2 * u)
+
+    def at(s):
+        if s < 2.5:
+            return wander(s), "look around"
+        if s < 4.5:
+            return lerp(wander(2.5), a, (s - 2.5) / 0.4), "hold first corner"
+        if s < 7.5:
+            return lerp(a, b, (s - 4.5) / 0.8), "move to opposite corner and hold"
+        if s < 9.5:
+            return lerp(b, a2, (s - 7.5) / 0.4), "hold first corner again"
+        if s < 12.5:
+            return lerp(a2, b2, (s - 9.5) / 0.8), "move to opposite corner and hold"
+        u = (s - 12.5) / 3 * 2 * math.pi
+        return (0.5 * W + 0.2 * W * math.cos(u), 0.45 * H + 0.15 * H * math.sin(u)), "look around"
+    return at, [], [(7.0, "r", "retry"), (12.0, "", "take a screenshot")], 15
+
+
+def box_script(W, H):
+    """Look around, hold upper left + long blink, move lower right + double blink."""
+    ul, lr = (0.3 * W, 0.3 * H), (0.7 * W, 0.68 * H)
+
+    def wander(s):
+        u = s / 6 * 2 * math.pi
+        return 0.5 * W + 0.3 * W * math.sin(u), 0.5 * H + 0.25 * H * math.sin(2 * u)
+
+    def at(s):
+        if s < 6:
+            return wander(s), "look around"
+        if s < 10:
+            return lerp(wander(6), ul, (s - 6) / 0.4), "hold upper left, long blink"
+        if s < 15:
+            return lerp(ul, lr, (s - 10) / 0.5), "hold lower right, double blink"
+        return wander(s - 15), "look around"
+    return at, [(8.5, 9.1), (13.5, 13.65), (13.95, 14.1)], [], 18
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--scenario", choices=["crop", "box"], default="crop")
+    p.add_argument("--port", type=int, default=50120, help="stand-in Pupil Remote port")
+    args, gazesnap_args = p.parse_known_args()
+
+    app = QApplication(sys.argv[:1])
+    screen = app.primaryScreen()
+    W, H = screen.geometry().width(), screen.geometry().height()
+    # same marker rectangle as Overlay.place_markers with the default --marker-size 120
+    g = screen.availableGeometry().intersected(screen.geometry())
+    inset = 120 // 4 + 8
+    left, top, right, bottom = g.left() + inset, g.top() + inset, g.right() - inset, g.bottom() - inset
+    at, blinks, says, length = (crop_script if args.scenario == "crop" else box_script)(W, H)
+
+    ctx = zmq.Context.instance()
+    rep = ctx.socket(zmq.REP)
+    rep.bind(f"tcp://127.0.0.1:{args.port}")
+    pub = ctx.socket(zmq.PUB)
+    pub_port = pub.bind_to_random_port("tcp://127.0.0.1")
+    connected = threading.Event()
+
+    def remote():
+        while True:
+            msg = rep.recv_string()
+            if msg == "SUB_PORT":
+                rep.send_string(str(pub_port))
+                connected.set()
+            elif msg.startswith("t"):
+                rep.send_string(repr(time.monotonic() + CLOCK))
+            else:
+                rep.send_string("demo")
+
+    threading.Thread(target=remote, daemon=True).start()
+    selection = "crop" if args.scenario == "crop" else "box"
+    cmd = [sys.executable, str(ROOT / "gazesnap.py"), "--source", "neon", "--selection", selection,
+           "--pupil-port", str(args.port), *gazesnap_args]
+    print("demo: starting", " ".join(cmd[1:]), flush=True)
+    gazesnap = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.PIPE, text=True)
+    try:
+        if not connected.wait(30):
+            print("demo: GazeSnap did not connect", flush=True)
+            return
+        time.sleep(2)  # let GazeSnap subscribe and draw its markers
+        t0 = time.monotonic()
+        step = None
+        while (s := time.monotonic() - t0) < length and gazesnap.poll() is None:
+            (x, y), name = at(s)
+            if name != step:
+                step = name
+                print(f"demo: {s:4.1f}s gaze -> {name}", flush=True)
+            while says and s >= says[0][0]:
+                _, command, phrase = says.pop(0)
+                print(f"demo: {s:4.1f}s voice -> \u201c{phrase}\u201d", flush=True)
+                gazesnap.stdin.write(command + "\n")
+                gazesnap.stdin.flush()
+            closed = any(a <= s < b for a, b in blinks)
+            ts = time.monotonic() + CLOCK
+            for eye in (0, 1):
+                pub.send_multipart([f"pupil.{eye}.2d".encode(), msgpack.packb(
+                    {"id": eye, "confidence": 0.02 if closed else 0.95, "timestamp": ts})])
+            nx = (x - left) / (right - left) + 0.002 * math.sin(97 * s)
+            ny = 1 - (y - top) / (bottom - top) + 0.002 * math.cos(89 * s)  # surface y points up
+            pub.send_multipart([b"surfaces.screen", msgpack.packb({"name": "screen", "timestamp": ts,
+                "gaze_on_surfaces": [{"norm_pos": [nx, ny], "confidence": 0.1 if closed else 0.95,
+                                      "on_surf": True, "timestamp": ts}]})])
+            time.sleep(1 / 120)
+        print("demo: done", flush=True)
+        time.sleep(1)
+    finally:
+        gazesnap.terminate()
+        gazesnap.wait(5)
+
+
+if __name__ == "__main__":
+    main()

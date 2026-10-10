@@ -29,6 +29,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setGeometry(screen_geometry)
 
+        self.crop = None
         self.show_gaze = show_gaze
         self.box = None          # (left, top, w, h) global
         self.gaze = None         # (x, y) global
@@ -102,7 +103,7 @@ class Overlay(QWidget):
             qp.fillRect(r.adjusted(-pad, -pad, pad, pad), Qt.GlobalColor.white)
             qp.drawImage(r, img)  # nearest-neighbour by default: crisp tag edges
 
-        if self.box and not self.paused:
+        if self.box and not self.paused and self.crop is None:
             r = self._local_rect(self.box)
             if self.stable:
                 pen = QPen(ACCENT, 3)
@@ -112,6 +113,30 @@ class Overlay(QWidget):
                 qp.setBrush(Qt.BrushStyle.NoBrush)
             qp.setPen(pen)
             qp.drawRoundedRect(r, 12, 12)
+
+        if self.crop is not None and not self.paused:
+            crop = self.crop
+            qp.setBrush(Qt.BrushStyle.NoBrush)
+            qp.setPen(QPen(ACCENT, 3))
+            if crop.rect:
+                qp.drawRect(self._local_rect(crop.rect))
+            if crop.anchor:
+                p = self.mapFromGlobal(QPoint(int(crop.anchor[0]), int(crop.anchor[1])))
+                qp.drawEllipse(p, 9, 9)
+            if crop.point and crop.state in ("first", "second"):
+                p = self.mapFromGlobal(QPoint(int(crop.point[0]), int(crop.point[1])))
+                qp.setPen(QPen(QColor(255, 255, 255, 180), 3))
+                qp.drawEllipse(p, 22, 22)
+                qp.setPen(QPen(ACCENT, 5))
+                qp.drawArc(QRectF(p.x()-22, p.y()-22, 44, 44), 90*16, -int(crop.progress*360*16))
+            qp.setFont(QFont("Helvetica Neue", 16))
+            instructions = {"first": "Look at the first corner and hold steady",
+                            "second": "Look at the opposite corner and hold steady",
+                            "preview": "Say “take a screenshot” to save · “retry” · “cancel”",
+                            "done": "Saving…"}
+            qp.setPen(Qt.GlobalColor.white)
+            qp.drawText(QRectF(20, 50, self.width()-40, 40), Qt.AlignmentFlag.AlignCenter,
+                        instructions[crop.state])
 
         if self.show_gaze and self.gaze and not self.paused:
             p = self.mapFromGlobal(QPoint(int(self.gaze[0]), int(self.gaze[1])))
