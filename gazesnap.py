@@ -19,7 +19,7 @@ import time
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QCursor, QImage
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit
 
 from capture import grab_region, play_shutter
 from core import BlinkDetector, BoxTracker, GazeFilter
@@ -88,9 +88,6 @@ class GazeSnapApp:
         self.resize_handle = ResizeHandle()
         self.resize_handle.moved.connect(self.resize_box)
         self.voice_control = None
-        if args.voice_control:
-            from voice_control import VoiceControl
-            self.voice_control = VoiceControl(self.events)
         self.detector = BlinkDetector(args.long_blink_ms, args.long_blink_max_ms,
                                       args.double_window_ms, args.cooldown_ms, args.blink_gesture)
         self.narrator = None
@@ -113,6 +110,28 @@ class GazeSnapApp:
         self.manual = True
         self.tracker.resize_to(right, bottom)
 
+    def toggle_voice(self):
+        if self.voice_control is not None:
+            self.voice_control.stop()
+            self.voice_control = None
+            self.overlay.voice_status = "Voice off • type v + Enter to enable ElevenLabs"
+            self.log("ElevenLabs microphone off")
+            return
+        if not os.environ.get("ELEVENLABS_API_KEY"):
+            key, accepted = QInputDialog.getText(
+                None, "Enable ElevenLabs voice commands",
+                "Microphone audio streams to ElevenLabs while enabled.\n"
+                "Enter your ElevenLabs API key (kept only for this session):",
+                QLineEdit.EchoMode.Password)
+            if not accepted or not key.strip():
+                self.log("Voice off: no ElevenLabs key provided; type v + Enter to retry")
+                return
+            os.environ["ELEVENLABS_API_KEY"] = key.strip()
+        from voice_control import VoiceControl
+        self.voice_control = VoiceControl(self.events)
+        self.overlay.voice_status = "Voice: connecting to ElevenLabs…"
+        self.voice_control.start()
+
     def _make_narrator(self):
         try:
             from narrator import Narrator
@@ -125,6 +144,8 @@ class GazeSnapApp:
     def log(self, msg):
         print(f"[gazesnap] {msg}", flush=True)
         self.overlay.set_status(msg)
+        if msg.startswith("voice:"):
+            self.overlay.voice_status = msg
 
     # --- main loop ------------------------------------------------------------
     def tick(self):
@@ -179,6 +200,8 @@ class GazeSnapApp:
             self.tracker.history.clear()
             self.filter = GazeFilter(self.args.min_cutoff, self.args.beta)
             self.log("manual: drag the blue handle" if self.manual else "following gaze/cursor")
+        elif cmd == "v":
+            self.toggle_voice()
         elif cmd == "n":
             self.narrate = not self.narrate
             if self.narrate and self.narrator is None:
@@ -187,7 +210,7 @@ class GazeSnapApp:
         elif cmd == "q":
             self.app.quit()
         else:
-            print("commands: Enter=snap  +/-=resize  p=pause  m=manual/follow  n=narration  q=quit", flush=True)
+            print("commands: Enter=snap  +/-=resize  p=pause  m=manual/follow  v=voice  n=narration  q=quit", flush=True)
 
     # --- capture ----------------------------------------------------------------
     def snap(self, rect):
@@ -229,8 +252,8 @@ class GazeSnapApp:
         signal.signal(signal.SIGINT, lambda *_: self.app.quit())
         threading.Thread(target=self._read_stdin, daemon=True).start()
         self.source.start()
-        if self.voice_control:
-            self.voice_control.start()
+        if self.args.voice_control:
+            QTimer.singleShot(0, self.toggle_voice)
         self.timer.start(16)  # ~60 Hz; also lets Python handle Ctrl+C
         hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
             else "long blink or double blink"

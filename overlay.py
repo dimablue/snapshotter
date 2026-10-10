@@ -19,6 +19,7 @@ class Overlay(QWidget):
         self.setWindowTitle("GazeSnap")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowTransparentForInput
             | Qt.WindowType.WindowDoesNotAcceptFocus
@@ -36,6 +37,7 @@ class Overlay(QWidget):
         self.hidden_for_capture = False
         self.flash_rect = None
         self.flash_until = 0.0
+        self.voice_status = "Voice off • type v + Enter to enable ElevenLabs"
         self.status = ""
         self.status_until = 0.0
         self.markers = []        # [(QImage, QRect global, pad)]
@@ -85,9 +87,13 @@ class Overlay(QWidget):
         return QRectF(p.x(), p.y(), w, h)
 
     def paintEvent(self, _):
-        if self.hidden_for_capture:
-            return  # fully transparent frame while the screenshot is taken
         qp = QPainter(self)
+        qp.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        qp.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        qp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if self.hidden_for_capture:
+            qp.end()
+            return
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = time.monotonic()
 
@@ -119,7 +125,7 @@ class Overlay(QWidget):
             qp.setBrush(QColor(255, 255, 255, alpha))
             qp.drawRoundedRect(self._local_rect(self.flash_rect), 12, 12)
 
-        text = "Paused" if self.paused else (self.status if now < self.status_until else "")
+        text = "Paused" if self.paused else (self.status if now < self.status_until else self.voice_status)
         if text:
             qp.setFont(QFont("Helvetica Neue", 15))
             fm = qp.fontMetrics()
@@ -141,7 +147,8 @@ class DragHandle(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
-                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.NoDropShadowWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setCursor(Qt.CursorShape.SizeAllCursor)

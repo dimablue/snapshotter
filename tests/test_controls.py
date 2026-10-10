@@ -35,6 +35,11 @@ def test_drag_pause_and_follow(monkeypatch):
     try:
         app.tick()
         assert app.manual and app.handle.isVisible()
+        assert app.overlay.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+        app.log("voice: listening")
+        assert app.overlay.voice_status == "voice: listening"
+        app.log("saved example.png")
+        assert app.overlay.voice_status == "voice: listening"
         initial = app.tracker.current_rect()
         QTest.mousePress(app.handle, Qt.MouseButton.LeftButton, pos=QPoint(20, 10))
         QTest.mouseMove(app.handle, QPoint(70, 40))
