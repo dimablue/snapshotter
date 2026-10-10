@@ -144,3 +144,79 @@ class BlinkDetector:
         self.last_fire = t_end
         self.last_short_start = None
         return t_start
+
+
+class CropSelector:
+    """Dwell selection independent of GUI and hardware. Times are monotonic seconds."""
+    def __init__(self, screen_w, screen_h, dwell_ms=800, radius=35):
+        self.screen_w, self.screen_h = screen_w, screen_h
+        self.dwell_s, self.radius = dwell_ms / 1000, radius
+        self.reset()
+
+    def reset(self):
+        self.state = "first"
+        self.anchor = None
+        self.rect = None
+        self.point = None
+        self.candidate = None
+        self.started = None
+        self.last_t = None
+        self.progress = 0.0
+        self.target = None
+
+    def clear_dwell(self):
+        self.candidate = self.started = self.target = None
+        self.progress = 0.0
+
+    def controls(self):
+        width, height, gap = 140, 64, 20
+        left = (self.screen_w - (3 * width + 2 * gap)) / 2
+        top = max(0, self.screen_h - 170)
+        return [(name, (int(left + i * (width + gap)), int(top), width, height))
+                for i, name in enumerate(("Save", "Retry", "Cancel"))]
+
+    def update(self, x, y, t):
+        if self.last_t is not None and t - self.last_t > 0.25:
+            self.clear_dwell()
+        self.last_t = t
+        x = min(max(x, 0), self.screen_w)
+        y = min(max(y, 0), self.screen_h)
+        self.point = (x, y)
+        target = None
+        if self.state == "preview":
+            for name, (left, top, w, h) in self.controls():
+                if left <= x < left + w and top <= y < top + h:
+                    target = name
+                    break
+            if target is None:
+                self.clear_dwell()
+                return None
+        elif self.state == "second":
+            ax, ay = self.anchor
+            self.rect = (int(min(ax, x)), int(min(ay, y)),
+                         int(abs(x - ax)), int(abs(y - ay)))
+            if self.rect[2] < 40 or self.rect[3] < 40:
+                self.clear_dwell()
+                return None
+        elif self.state != "first":
+            return None
+        if (self.candidate is None or target != self.target
+                or (target is None and math.hypot(x - self.candidate[0], y - self.candidate[1]) > self.radius)):
+            self.candidate, self.started, self.target = (x, y), t, target
+        self.progress = min(1.0, (t - self.started) / self.dwell_s)
+        if self.progress < 1:
+            return None
+        point = self.candidate
+        self.clear_dwell()
+        if self.state == "first":
+            self.anchor = point
+            self.state = "second"
+        elif self.state == "second":
+            ax, ay = self.anchor
+            px, py = point
+            self.rect = (int(min(ax, px)), int(min(ay, py)), int(abs(px - ax)), int(abs(py - ay)))
+            self.state = "preview"
+        else:
+            self.state = "done"
+            return target.lower()
+        return None
