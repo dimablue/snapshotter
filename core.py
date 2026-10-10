@@ -58,7 +58,8 @@ class BoxTracker:
     def __init__(self, screen_w, screen_h, box_w=480, box_h=300,
                  stable_radius=60, stable_ms=300, history_s=1.5):
         self.screen_w, self.screen_h = screen_w, screen_h
-        self.box_w, self.box_h = box_w, box_h
+        self.box_w = min(max(box_w, 1), screen_w)
+        self.box_h = min(max(box_h, 1), screen_h)
         self.stable_radius = stable_radius
         self.stable_s = stable_ms / 1000
         self.history = deque()  # (t, x, y) filtered
@@ -79,6 +80,15 @@ class BoxTracker:
     def resize(self, factor):
         self.box_w = int(min(max(self.box_w * factor, 120), self.screen_w))
         self.box_h = int(min(max(self.box_h * factor, 80), self.screen_h))
+
+    def resize_to(self, right, bottom):
+        """Resize from bottom-right, preserving the visible top-left corner."""
+        left, top, _, _ = self.current_rect()
+        self.box_w = int(min(max(right - left, 120), self.screen_w - left))
+        self.box_h = int(min(max(bottom - top, 80), self.screen_h - top))
+        self.x, self.y = left + self.box_w / 2, top + self.box_h / 2
+        self.history.clear()
+        self.stable = False
 
     def rect_at(self, cx, cy):
         """(left, top, w, h) centred on cx, cy and clamped inside the screen."""

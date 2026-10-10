@@ -6,7 +6,7 @@ window's local coordinates, because macOS may push the window below the menu bar
 import time
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
@@ -132,3 +132,57 @@ class Overlay(QWidget):
             elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(w - 32))
             qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, elided)
         qp.end()
+
+
+class DragHandle(QWidget):
+    """Small input-enabled window; the full-screen overlay stays click-through."""
+    moved = pyqtSignal(float, float)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setFixedSize(150, 26)
+        self.offset = None
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), ACCENT)
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Drag capture box")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.offset = event.globalPosition() - self.pos().toPointF()
+
+    def mouseMoveEvent(self, event):
+        if self.offset is not None:
+            pos = event.globalPosition() - self.offset
+            self.moved.emit(pos.x(), pos.y())
+
+    def mouseReleaseEvent(self, event):
+        self.offset = None
+
+
+class ResizeHandle(DragHandle):
+    """Bottom-right grip; moved emits the desired bottom-right screen point."""
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setToolTip("Drag to resize the capture box")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), ACCENT)
+        painter.setPen(QPen(Qt.GlobalColor.white, 2))
+        for inset in (6, 12, 18):
+            painter.drawLine(inset, 22, 22, inset)
+
+    def mouseMoveEvent(self, event):
+        if self.offset is not None:
+            pos = event.globalPosition() - self.offset
+            self.moved.emit(pos.x() + self.width(), pos.y() + self.height())

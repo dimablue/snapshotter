@@ -1,0 +1,2 @@
+sounddevice>=0.5,<1
+websockets>=14,<16

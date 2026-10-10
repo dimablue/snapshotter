@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import QApplication
 
 from capture import grab_region, play_shutter
 from core import BlinkDetector, BoxTracker, GazeFilter
-from overlay import Overlay
+from overlay import Overlay, DragHandle, ResizeHandle
 from sources import SOURCE_NAMES, get_source_class
 
 
@@ -37,6 +37,10 @@ def parse_args():
     p.add_argument("--box", nargs=2, type=int, default=[480, 300], metavar=("W", "H"))
     p.add_argument("--no-gaze-dot", action="store_true", help="hide the red gaze dot")
     p.add_argument("--no-sound", action="store_true")
+    p.add_argument("--position", choices=["manual", "follow"], default=None,
+                   help="default: manual with mouse/webcam, follow with Neon")
+    p.add_argument("--voice-control", action="store_true", help="listen with ElevenLabs for screenshot commands")
+    p.add_argument("--no-blink-capture", action="store_true", help="capture only with Enter or voice")
     # smoothing
     p.add_argument("--min-cutoff", type=float, default=1.0, help="lower = smoother, laggier box")
     p.add_argument("--beta", type=float, default=0.007, help="higher = box catches fast glances sooner")
@@ -78,6 +82,15 @@ class GazeSnapApp:
 
         self.filter = GazeFilter(args.min_cutoff, args.beta)
         self.tracker = BoxTracker(self.screen_w, self.screen_h, *args.box)
+        self.manual = (args.position or ("follow" if args.source == "neon" else "manual")) == "manual"
+        self.handle = DragHandle()
+        self.handle.moved.connect(self.move_box)
+        self.resize_handle = ResizeHandle()
+        self.resize_handle.moved.connect(self.resize_box)
+        self.voice_control = None
+        if args.voice_control:
+            from voice_control import VoiceControl
+            self.voice_control = VoiceControl(self.events)
         self.detector = BlinkDetector(args.long_blink_ms, args.long_blink_max_ms,
                                       args.double_window_ms, args.cooldown_ms, args.blink_gesture)
         self.narrator = None
@@ -89,6 +102,16 @@ class GazeSnapApp:
         self.snapping = False
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
+
+    def move_box(self, left, top):
+        self.manual = True
+        self.tracker.history.clear()
+        self.tracker.update(left + self.tracker.box_w / 2,
+                            top + self.tracker.box_h / 2, time.monotonic())
+
+    def resize_box(self, right, bottom):
+        self.manual = True
+        self.tracker.resize_to(right, bottom)
 
     def _make_narrator(self):
         try:
@@ -117,10 +140,11 @@ class GazeSnapApp:
             if kind == "gaze":
                 _, x, y, t = ev
                 fx, fy = self.filter(x, y, t)
-                self.tracker.update(fx, fy, t)
+                if not self.manual:
+                    self.tracker.update(fx, fy, t)
             elif kind == "blink":
                 _, t0, t1 = ev
-                if not self.paused:
+                if not self.paused and not self.args.no_blink_capture:
                     start = self.detector.on_blink(t0, t1)
                     if start is not None:
                         self.snap(self.tracker.rect_before(start))
@@ -133,6 +157,11 @@ class GazeSnapApp:
         self.overlay.gaze = (self.tracker.x, self.tracker.y)
         self.overlay.stable = self.tracker.stable
         self.overlay.paused = self.paused
+        left, top, width, height = self.overlay.box
+        self.handle.move(left, top)
+        self.handle.setVisible(self.manual and not self.paused and not self.snapping)
+        self.resize_handle.move(left + width - 26, top + height - 26)
+        self.resize_handle.setVisible(self.manual and not self.paused and not self.snapping)
         self.overlay.update()
 
     def command(self, cmd):
@@ -145,6 +174,11 @@ class GazeSnapApp:
         elif cmd == "p":
             self.paused = not self.paused
             self.log("paused" if self.paused else "resumed")
+        elif cmd == "m":
+            self.manual = not self.manual
+            self.tracker.history.clear()
+            self.filter = GazeFilter(self.args.min_cutoff, self.args.beta)
+            self.log("manual: drag the blue handle" if self.manual else "following gaze/cursor")
         elif cmd == "n":
             self.narrate = not self.narrate
             if self.narrate and self.narrator is None:
@@ -153,13 +187,15 @@ class GazeSnapApp:
         elif cmd == "q":
             self.app.quit()
         else:
-            print("commands: Enter=snap  +/-=resize  p=pause  n=narration  q=quit", flush=True)
+            print("commands: Enter=snap  +/-=resize  p=pause  m=manual/follow  n=narration  q=quit", flush=True)
 
     # --- capture ----------------------------------------------------------------
     def snap(self, rect):
-        if self.snapping:
+        if self.snapping or self.paused:
             return
         self.snapping = True
+        self.handle.hide()
+        self.resize_handle.hide()
         self.overlay.hidden_for_capture = True
         self.overlay.repaint()
         # give the window server a frame or two to drop the overlay before grabbing
@@ -193,12 +229,18 @@ class GazeSnapApp:
         signal.signal(signal.SIGINT, lambda *_: self.app.quit())
         threading.Thread(target=self._read_stdin, daemon=True).start()
         self.source.start()
+        if self.voice_control:
+            self.voice_control.start()
         self.timer.start(16)  # ~60 Hz; also lets Python handle Ctrl+C
         hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
             else "long blink or double blink"
         self.log(f"GazeSnap ({self.args.source}): look at something, {hint} to snap")
         code = self.app.exec()
         self.source.stop()
+        if self.voice_control:
+            self.voice_control.stop()
+        self.handle.close()
+        self.resize_handle.close()
         return code
 
 

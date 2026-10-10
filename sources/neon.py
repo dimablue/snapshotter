@@ -34,19 +34,22 @@ class NeonSource(GazeSource):
         if device is None:
             self.emit_status("neon: no device found. Same Wi-Fi/hotspot? Or pass --neon-ip")
             return
-        self.emit_status(f"neon: connected to {device.phone_name}")
-
-        mapper = GazeMapper(device.get_calibration())
-        surface = mapper.add_surface(self.marker_verts, (self.screen_w, self.screen_h))
-
-        mode = self.args.blink_mode
-        baseline = None
-        closed_since = None
-        last_seen_screen = time.monotonic()
         try:
+            self.emit_status(f"neon: connected to {device.phone_name}")
+
+            mapper = GazeMapper(device.get_calibration())
+            surface = mapper.add_surface(self.marker_verts, (self.screen_w, self.screen_h))
+
+            mode = self.args.blink_mode
+            baseline = None
+            closed_since = None
+            last_seen_screen = time.monotonic()
             while not self.stopped:
                 item = device.receive_matched_scene_video_frame_and_gaze(timeout_seconds=1)
                 if item is None:
+                    if time.monotonic() - last_seen_screen > 3:
+                        self.emit_status("neon: waiting for scene/gaze data; check Companion streaming and network")
+                        last_seen_screen = time.monotonic()
                     continue
                 now = time.monotonic()
                 gaze = item.gaze
@@ -64,6 +67,9 @@ class NeonSource(GazeSource):
                 if now - last_seen_screen > 2:
                     self.emit_status("neon: screen markers not visible")
                     last_seen_screen = now
+
+                if getattr(self.args, "no_blink_capture", False):
+                    continue
 
                 if mode == "auto":
                     mode = "eyelid" if hasattr(gaze, "eyelid_aperture_left") else "events"
