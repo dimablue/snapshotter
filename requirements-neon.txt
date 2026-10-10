@@ -1,0 +1,2 @@
+pupil-labs-realtime-api>=1.9
+git+https://github.com/pupil-labs/real-time-screen-gaze.git

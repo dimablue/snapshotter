@@ -1,0 +1,134 @@
+"""Transparent, click-through, always-on-top window that draws the gaze box and markers.
+
+All state is in global screen coordinates (logical points). Painting converts to the
+window's local coordinates, because macOS may push the window below the menu bar.
+"""
+import time
+
+import numpy as np
+from PyQt6.QtCore import QPoint, QRect, QRectF, Qt
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PyQt6.QtWidgets import QWidget
+
+ACCENT = QColor(45, 127, 249)
+
+
+class Overlay(QWidget):
+    def __init__(self, screen_geometry, show_gaze=True):
+        super().__init__()
+        self.setWindowTitle("GazeSnap")
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setGeometry(screen_geometry)
+
+        self.show_gaze = show_gaze
+        self.box = None          # (left, top, w, h) global
+        self.gaze = None         # (x, y) global
+        self.stable = False
+        self.paused = False
+        self.hidden_for_capture = False
+        self.flash_rect = None
+        self.flash_until = 0.0
+        self.status = ""
+        self.status_until = 0.0
+        self.markers = []        # [(QImage, QRect global, pad)]
+
+    # --- markers ------------------------------------------------------------
+    def place_markers(self, size, available):
+        """Draw AprilTags 0-3 in the screen corners. Returns verts for GazeMapper.
+
+        `available` is the screen area minus menu bar and Dock (which would hide the tags).
+        """
+        from pupil_labs.real_time_screen_gaze import marker_generator
+
+        g = available.intersected(self.geometry())  # actual window may start below the menu bar
+        pad = max(size // 4, 12)  # white quiet zone the detector needs around each tag
+        inset = pad + 8
+        corners = {
+            0: (g.left() + inset, g.top() + inset),
+            1: (g.right() - inset - size, g.top() + inset),
+            2: (g.right() - inset - size, g.bottom() - inset - size),
+            3: (g.left() + inset, g.bottom() - inset - size),
+        }
+        verts = {}
+        self.markers = []
+        for marker_id, (x, y) in corners.items():
+            pixels = np.ascontiguousarray(marker_generator.generate_marker(marker_id))
+            h, w = pixels.shape
+            img = QImage(pixels.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+            self.markers.append((img, QRect(x, y, size, size), pad))
+            # corner order: top-left, top-right, bottom-right, bottom-left (screen px, y down)
+            verts[marker_id] = [(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
+        self.update()
+        return verts
+
+    # --- state from the app -------------------------------------------------
+    def set_status(self, text, seconds=6.0):
+        self.status = text
+        self.status_until = time.monotonic() + seconds
+
+    def flash(self, rect):
+        self.flash_rect = rect
+        self.flash_until = time.monotonic() + 0.35
+
+    # --- painting -------------------------------------------------------------
+    def _local_rect(self, rect):
+        left, top, w, h = rect
+        p = self.mapFromGlobal(QPoint(int(left), int(top)))
+        return QRectF(p.x(), p.y(), w, h)
+
+    def paintEvent(self, _):
+        if self.hidden_for_capture:
+            return  # fully transparent frame while the screenshot is taken
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        now = time.monotonic()
+
+        for img, rect, pad in self.markers:
+            r = self._local_rect((rect.x(), rect.y(), rect.width(), rect.height()))
+            qp.fillRect(r.adjusted(-pad, -pad, pad, pad), Qt.GlobalColor.white)
+            qp.drawImage(r, img)  # nearest-neighbour by default: crisp tag edges
+
+        if self.box and not self.paused:
+            r = self._local_rect(self.box)
+            if self.stable:
+                pen = QPen(ACCENT, 3)
+                qp.setBrush(QColor(45, 127, 249, 22))
+            else:
+                pen = QPen(QColor(45, 127, 249, 170), 2, Qt.PenStyle.DashLine)
+                qp.setBrush(Qt.BrushStyle.NoBrush)
+            qp.setPen(pen)
+            qp.drawRoundedRect(r, 12, 12)
+
+        if self.show_gaze and self.gaze and not self.paused:
+            p = self.mapFromGlobal(QPoint(int(self.gaze[0]), int(self.gaze[1])))
+            qp.setPen(Qt.PenStyle.NoPen)
+            qp.setBrush(QColor(255, 80, 80, 200))
+            qp.drawEllipse(p, 5, 5)
+
+        if self.flash_rect and now < self.flash_until:
+            alpha = int(220 * (self.flash_until - now) / 0.35)
+            qp.setPen(Qt.PenStyle.NoPen)
+            qp.setBrush(QColor(255, 255, 255, alpha))
+            qp.drawRoundedRect(self._local_rect(self.flash_rect), 12, 12)
+
+        text = "Paused" if self.paused else (self.status if now < self.status_until else "")
+        if text:
+            qp.setFont(QFont("Helvetica Neue", 15))
+            fm = qp.fontMetrics()
+            w = min(fm.horizontalAdvance(text) + 32, self.width() - 40)
+            pill = QRectF((self.width() - w) / 2, self.height() - 90, w, 40)
+            qp.setPen(Qt.PenStyle.NoPen)
+            qp.setBrush(QColor(20, 20, 24, 210))
+            qp.drawRoundedRect(pill, 20, 20)
+            qp.setPen(QColor(255, 255, 255))
+            elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(w - 32))
+            qp.drawText(pill, Qt.AlignmentFlag.AlignCenter, elided)
+        qp.end()

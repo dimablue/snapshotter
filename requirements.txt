@@ -1,0 +1,6 @@
+PyQt6>=6.5
+mss>=9
+numpy<2
+anthropic>=1.13
+opencv-contrib-python>=4.8,<4.12
+mediapipe==0.10.21
