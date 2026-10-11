@@ -152,7 +152,7 @@ class Overlay(QWidget):
                         instructions[crop.state])
 
         if self.check is not None:
-            target, n, total = self.check
+            target, n, total, *text = self.check
             if target is not None:
                 p = self.mapFromGlobal(QPoint(int(target[0]), int(target[1])))
                 qp.setPen(QPen(QColor(255, 255, 255), 4))
@@ -164,7 +164,7 @@ class Overlay(QWidget):
             qp.setFont(QFont("Helvetica Neue", 18))
             qp.setPen(Qt.GlobalColor.white)
             qp.drawText(QRectF(20, 50, self.width() - 40, 40), Qt.AlignmentFlag.AlignCenter,
-                        f"Look at the red dot ({n}/{total}) — keep your head still")
+                        text[0] if text else f"Look at the red dot ({n}/{total}) — keep your head still")
 
         if self.show_gaze and self.gaze and not self.paused and not self.idle and self.check is None:
             p = self.mapFromGlobal(QPoint(int(self.gaze[0]), int(self.gaze[1])))
