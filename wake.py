@@ -1,7 +1,7 @@
 """Offline, free wake phrase: "hey Neon, take a screenshot", and the selection commands.
 
 Vosk recognizes speech locally, restricted to a few phrases, so it is fast (the phrase
-usually fires before you finish saying it) and nothing leaves the computer. GazeSnap only
+usually fires before you finish saying it) and nothing leaves the computer. Snapshotter only
 connects to ElevenLabs after this fires.
 
 While a selection is open ("selecting"), "capture", "retry" and "cancel" are recognized here
@@ -22,7 +22,7 @@ from voice_control import commands_in
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
-MODEL_DIR = Path.home() / ".cache" / "gazesnap"
+MODEL_DIR = Path.home() / ".cache" / "snapshotter"
 # Restricting Vosk to these phrases is what makes it accurate; anything else becomes [unk].
 GRAMMAR = ["hey neon take a screenshot", "hey neon take screenshot", "hey neon screenshot",
            "okay neon take a screenshot", "ok neon take a screenshot", "neon take a screenshot",

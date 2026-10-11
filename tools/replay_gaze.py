@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Replay a session from tools/record_gaze.py into GazeSnap, as if the Neon were plugged in.
+"""Replay a session from tools/record_gaze.py into Snapshotter, as if the Neon were plugged in.
 
 A stand-in for Pupil Capture's network API publishes the recorded pupil, gaze and surface
-messages with their original timing (timestamps moved to now), and GazeSnap connects to it
-with --source neon. The recorded dots are drawn too, so you can see how far GazeSnap's gaze
+messages with their original timing (timestamps moved to now), and Snapshotter connects to it
+with --source neon. The recorded dots are drawn too, so you can see how far Snapshotter's gaze
 is from where the eyes really were.
 
     python tools/replay_gaze.py recordings/<date_time>
     python tools/replay_gaze.py recordings/<date_time> --loop --speed 0.5
-    python tools/replay_gaze.py recordings/<date_time> --no-gazesnap   # then run gazesnap.py --pupil-port 50120 yourself
+    python tools/replay_gaze.py recordings/<date_time> --no-snapshotter   # then run snapshotter.py --pupil-port 50120 yourself
 
-Extra arguments go to gazesnap.py, e.g. `--wake` or `--no-correction`.
+Extra arguments go to snapshotter.py, e.g. `--wake` or `--no-correction`.
 """
 import argparse
 import signal
@@ -35,7 +35,7 @@ REPLAYED = ("pupil.", "gaze.", "surfaces.", "fixations", "blinks")
 
 
 def retime(msg, shift):
-    """Move every timestamp GazeSnap reads by `shift` seconds."""
+    """Move every timestamp Snapshotter reads by `shift` seconds."""
     if "timestamp" in msg:
         msg["timestamp"] += shift
     for key in ("gaze_on_surfaces", "fixations_on_surfaces"):
@@ -97,8 +97,8 @@ def main():
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--loop", action="store_true")
     p.add_argument("--no-dots", action="store_true", help="don't draw the recorded dots")
-    p.add_argument("--no-gazesnap", action="store_true", help="only serve the data")
-    args, gazesnap_args = p.parse_known_args()
+    p.add_argument("--no-snapshotter", action="store_true", help="only serve the data")
+    args, snapshotter_args = p.parse_known_args()
 
     meta, events, messages = load(args.session)
     player = Player(meta, events, messages, args.speed, args.loop)
@@ -128,26 +128,26 @@ def main():
                 rep.send_string(f"replay of {meta.get('pupil_version')}")
             else:
                 if request.startswith("notify."):
-                    print(f"replay: GazeSnap sent {request} (ignored)", flush=True)
+                    print(f"replay: Snapshotter sent {request} (ignored)", flush=True)
                 rep.send_string("replay")
 
     threading.Thread(target=remote, daemon=True).start()
 
-    gazesnap = None
-    if args.no_gazesnap:
-        print(f"replay: serving on port {args.port}. Run:\n  .venv/bin/python gazesnap.py --source neon "
+    snapshotter = None
+    if args.no_snapshotter:
+        print(f"replay: serving on port {args.port}. Run:\n  .venv/bin/python snapshotter.py --source neon "
               f"--pupil-port {args.port}", flush=True)
     else:
-        cmd = [sys.executable, str(ROOT / "gazesnap.py"), "--source", "neon", "--pupil-port", str(args.port),
-               "--surface", meta.get("surface", "screen"), *gazesnap_args]
+        cmd = [sys.executable, str(ROOT / "snapshotter.py"), "--source", "neon", "--pupil-port", str(args.port),
+               "--surface", meta.get("surface", "screen"), *snapshotter_args]
         print("replay: starting", " ".join(cmd[1:]), flush=True)
-        gazesnap = subprocess.Popen(cmd, cwd=ROOT)
+        snapshotter = subprocess.Popen(cmd, cwd=ROOT)
 
     def start_playing():
         if not connected.wait(60):
             print("replay: nothing connected", flush=True)
             return
-        time.sleep(2)  # let GazeSnap subscribe and draw its markers
+        time.sleep(2)  # let Snapshotter subscribe and draw its markers
         print(f"replay: playing {player.duration:.0f} s at {args.speed}x", flush=True)
         player.run(pub, clock_offset_now)
 
@@ -159,7 +159,7 @@ def main():
         overlay.show()
 
     def tick():
-        if gazesnap is not None and gazesnap.poll() is not None:
+        if snapshotter is not None and snapshotter.poll() is not None:
             app.quit()
             return
         if overlay is None:
@@ -180,9 +180,9 @@ def main():
     try:
         app.exec()
     finally:
-        if gazesnap is not None and gazesnap.poll() is None:
-            gazesnap.terminate()
-            gazesnap.wait(5)
+        if snapshotter is not None and snapshotter.poll() is None:
+            snapshotter.terminate()
+            snapshotter.wait(5)
 
 
 if __name__ == "__main__":

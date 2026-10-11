@@ -58,7 +58,7 @@ def main():
     if apertures:
         print(f"eyelid aperture mm: min {min(apertures):.1f}, median {sorted(apertures)[len(apertures)//2]:.1f}, "
               f"max {max(apertures):.1f}")
-    print("\nNext: python gazesnap.py --source neon-companion" + (f" --neon-ip {a.ip}" if a.ip else ""))
+    print("\nNext: python snapshotter.py --source neon-companion" + (f" --neon-ip {a.ip}" if a.ip else ""))
 
 
 if __name__ == "__main__":

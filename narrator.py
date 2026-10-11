@@ -38,7 +38,7 @@ class Narrator:
         except self.anthropic.APIStatusError as e:
             text = f"Claude returned an error, status {e.status_code}."
         except Exception as e:  # e.g. no credentials configured at all
-            print(f"[gazesnap] narration failed: {e}", flush=True)
+            print(f"[snapshotter] narration failed: {e}", flush=True)
             text = "Narration failed. Is ANTHROPIC_API_KEY set?"
         self.on_text(text)
         self.speak(text)

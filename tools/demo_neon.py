@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Demo `--source neon` without the headset: plays a scripted gaze session through a
-stand-in for Pupil Capture's network API, and starts GazeSnap connected to it.
+stand-in for Pupil Capture's network API, and starts Snapshotter connected to it.
 
     python tools/demo_neon.py                 # "hey Neon, take a screenshot", drag with gaze, "capture"
     python tools/demo_neon.py --scenario box  # box follows gaze; long blink, double blink
 
-Voice commands are simulated: the demo sends GazeSnap the same command the microphone would.
-Extra arguments go to gazesnap.py, e.g. `python tools/demo_neon.py --no-sound`.
+Voice commands are simulated: the demo sends Snapshotter the same command the microphone would.
+Extra arguments go to snapshotter.py, e.g. `python tools/demo_neon.py --no-sound`.
 """
 import argparse
 import math
@@ -79,7 +79,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--scenario", choices=["voice", "box"], default="voice")
     p.add_argument("--port", type=int, default=50120, help="stand-in Pupil Remote port")
-    args, gazesnap_args = p.parse_known_args()
+    args, snapshotter_args = p.parse_known_args()
 
     app = QApplication(sys.argv[:1])
     screen = app.primaryScreen()
@@ -112,18 +112,18 @@ def main():
                 rep.send_string("demo")
 
     threading.Thread(target=remote, daemon=True).start()
-    cmd = [sys.executable, str(ROOT / "gazesnap.py"), "--source", "neon",
-           "--pupil-port", str(args.port), *gazesnap_args]
+    cmd = [sys.executable, str(ROOT / "snapshotter.py"), "--source", "neon",
+           "--pupil-port", str(args.port), *snapshotter_args]
     print("demo: starting", " ".join(cmd[1:]), flush=True)
-    gazesnap = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.PIPE, text=True)
+    snapshotter = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.PIPE, text=True)
     try:
         if not connected.wait(30):
-            print("demo: GazeSnap did not connect", flush=True)
+            print("demo: Snapshotter did not connect", flush=True)
             return
-        time.sleep(2)  # let GazeSnap subscribe and draw its markers
+        time.sleep(2)  # let Snapshotter subscribe and draw its markers
         t0 = time.monotonic()
         step = None
-        while (s := time.monotonic() - t0) < length and gazesnap.poll() is None:
+        while (s := time.monotonic() - t0) < length and snapshotter.poll() is None:
             (x, y), name = at(s)
             if name != step:
                 step = name
@@ -131,8 +131,8 @@ def main():
             while says and s >= says[0][0]:
                 _, command, phrase = says.pop(0)
                 print(f"demo: {s:4.1f}s voice -> \u201c{phrase}\u201d", flush=True)
-                gazesnap.stdin.write(command + "\n")
-                gazesnap.stdin.flush()
+                snapshotter.stdin.write(command + "\n")
+                snapshotter.stdin.flush()
             closed = any(a <= s < b for a, b in blinks)
             ts = time.monotonic() + CLOCK
             for eye in (0, 1):
@@ -147,8 +147,8 @@ def main():
         print("demo: done", flush=True)
         time.sleep(1)
     finally:
-        gazesnap.terminate()
-        gazesnap.wait(5)
+        snapshotter.terminate()
+        snapshotter.wait(5)
 
 
 if __name__ == "__main__":

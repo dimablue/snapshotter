@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command Pupil Capture setup for GazeSnap with the Neon.
+"""One-command Pupil Capture setup for Snapshotter with the Neon.
 
     python tools/neon_setup.py install   # once, BEFORE starting Pupil Capture (asks for your password)
     python tools/neon_setup.py           # with Pupil Capture running: configure it
@@ -36,7 +36,7 @@ TRACKER_ARGS = {"use_high_res": 1.0, "sharpen": 1.0}
 
 
 def screen_markers(marker_size):
-    """Screen-pixel corners of GazeSnap's markers, exactly as the overlay draws them."""
+    """Screen-pixel corners of Snapshotter's markers, exactly as the overlay draws them."""
     from PyQt6.QtWidgets import QApplication
     sys.path.insert(0, str(ROOT))
     from overlay import marker_layout
@@ -49,7 +49,7 @@ def screen_markers(marker_size):
 
 
 def surface_definition(verts, name="screen"):
-    """Pupil Capture surface (definitions v01) spanning GazeSnap's markers, which is the frame
+    """Pupil Capture surface (definitions v01) spanning Snapshotter's markers, which is the frame
     sources/pupil_capture.py maps back to screen pixels. Surface coordinates have y up."""
     xs = [x for v in verts.values() for x, _ in v]
     ys = [y for v in verts.values() for _, y in v]
@@ -195,13 +195,13 @@ def configure(remote, camera, seconds):
     print("Next: python tools/neon_setup.py calibrate" if ok else "Fix the eyes first, then calibrate.")
 
 
-CALIBRATIONS = Path("~/.cache/gazesnap/calibrations").expanduser()
-CORRECTION = Path("~/.cache/gazesnap/gaze_correction.json").expanduser()
+CALIBRATIONS = Path("~/.cache/snapshotter/calibrations").expanduser()
+CORRECTION = Path("~/.cache/snapshotter/gaze_correction.json").expanduser()
 CALIBRATION_FILES = ("prerecorded_calibration_result", "prerecorded_calibration_setup", "surface_definitions_v01")
 
 
 def save_calibration(pupil_dir, name):
-    """Copy Pupil's last calibration, the screen surface and GazeSnap's gaze correction."""
+    """Copy Pupil's last calibration, the screen surface and Snapshotter's gaze correction."""
     target = CALIBRATIONS / name
     target.mkdir(parents=True, exist_ok=True)
     settings = Path(pupil_dir).expanduser() / "capture_settings"
@@ -215,7 +215,7 @@ def save_calibration(pupil_dir, name):
 
 def restore_calibration(remote, name):
     """Restart Pupil's gaze mapper with the saved parameters and put the gaze correction back.
-    Only right if the headset sits as it did then: check with gazesnap.py --check."""
+    Only right if the headset sits as it did then: check with snapshotter.py --check."""
     source = CALIBRATIONS / name
     if not source.is_dir():
         saved = sorted(p.name for p in CALIBRATIONS.glob("*") if p.is_dir())
@@ -225,7 +225,7 @@ def restore_calibration(remote, name):
     print(f"Pupil Capture: {result['gazer_class_name']} calibration from {name} restored")
     if (source / CORRECTION.name).exists():
         shutil.copy2(source / CORRECTION.name, CORRECTION)
-        print("gaze correction restored (restart GazeSnap to use it)")
+        print("gaze correction restored (restart Snapshotter to use it)")
 
 
 def main():
@@ -238,7 +238,7 @@ def main():
     p.add_argument("--port", type=int, default=50020)
     p.add_argument("--camera", default="Neon", help="macOS camera name to use for the scene camera")
     p.add_argument("--seconds", type=float, default=8)
-    p.add_argument("--marker-size", type=int, default=None, help="same as gazesnap.py --marker-size")
+    p.add_argument("--marker-size", type=int, default=None, help="same as snapshotter.py --marker-size")
     a = p.parse_args()
     if a.action == "install":
         return install(a.pupil_dir)

@@ -10,7 +10,7 @@ Run with the Neon plugged in and Pupil Capture NOT running (it takes the camera 
     python tools/scene_cam_test.py                 # 10 s from the Neon scene camera
     python tools/scene_cam_test.py --camera "MacBook"  # any camera whose name contains this
 
-Put GazeSnap's markers on screen first (e.g. `python tools/demo_neon.py`) and look at the
+Put Snapshotter's markers on screen first (e.g. `python tools/demo_neon.py`) and look at the
 screen, to also measure AprilTag detection. A few frames are saved for a visual check.
 """
 import argparse
@@ -50,7 +50,7 @@ def main():
     p.add_argument("--size", nargs=2, type=int, default=[1280, 720], metavar=("W", "H"))
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--seconds", type=float, default=10)
-    p.add_argument("--out", default=os.path.expanduser("~/Pictures/GazeSnap/scene-test"))
+    p.add_argument("--out", default=os.path.expanduser("~/Pictures/Snapshotter/scene-test"))
     a = p.parse_args()
 
     names = avfoundation_cameras()

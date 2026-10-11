@@ -89,7 +89,8 @@ def is_capture_command(text):
     return voice_command(text) == "capture"
 
 
-KEYCHAIN_SERVICE = "gazesnap-elevenlabs"
+KEYCHAIN_SERVICE = "snapshotter-elevenlabs"
+OLD_KEYCHAIN_SERVICE = "gazesnap-elevenlabs"  # the app's earlier name; keys saved under it still work
 
 
 def get_api_key():
@@ -97,12 +98,15 @@ def get_api_key():
     key = os.environ.get("ELEVENLABS_API_KEY")
     if key:
         return key
-    try:
-        out = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-                             capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    for service in (KEYCHAIN_SERVICE, OLD_KEYCHAIN_SERVICE):
+        try:
+            out = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    return None
 
 
 class VoiceError(RuntimeError):

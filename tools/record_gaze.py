@@ -5,7 +5,7 @@
     python tools/record_gaze.py --no-calibrate
     python tools/record_gaze.py --quick       # short run to test the recorder itself
 
-Needs Pupil Capture running and set up (python tools/neon_setup.py). The overlay draws GazeSnap's
+Needs Pupil Capture running and set up (python tools/neon_setup.py). The overlay draws Snapshotter's
 corner markers and a red dot at known screen positions:
 
   still     5 x 5 dots, head still: accuracy across the screen
@@ -22,7 +22,7 @@ It also makes a Pupil Capture recording (scene + eye videos, ~/recordings/...), 
 Player can re-run offline: pupil detection, calibration, surface tracking.
 
 Then: python tools/analyze_gaze.py recordings/<date_time>
-      python tools/replay_gaze.py recordings/<date_time>   # feed it to GazeSnap
+      python tools/replay_gaze.py recordings/<date_time>   # feed it to Snapshotter
 """
 import argparse
 import json
@@ -47,7 +47,7 @@ from neon_setup import Remote  # noqa: E402
 from overlay import DEFAULT_MARKER_SIZE, Overlay, marker_layout  # noqa: E402
 
 TOPICS = ("pupil.", "gaze.", "surfaces.", "notify.", "logging.", "fixations", "blinks")
-CORRECTION_PATH = Path("~/.cache/gazesnap/gaze_correction.json").expanduser()
+CORRECTION_PATH = Path("~/.cache/snapshotter/gaze_correction.json").expanduser()
 
 
 class StreamRecorder(threading.Thread):
@@ -353,8 +353,8 @@ def main():
     p.add_argument("--port", type=int, default=50020, help="Pupil Remote port")
     p.add_argument("--surface", default="screen")
     p.add_argument("--marker-size", type=int, default=DEFAULT_MARKER_SIZE)
-    p.add_argument("--marker-opacity", type=float, default=1.0, help="same as gazesnap.py")
-    p.add_argument("--marker-border", type=int, default=-1, help="same as gazesnap.py")
+    p.add_argument("--marker-opacity", type=float, default=1.0, help="same as snapshotter.py")
+    p.add_argument("--marker-border", type=int, default=-1, help="same as snapshotter.py")
     p.add_argument("--out", default=str(ROOT / "recordings"))
     p.add_argument("--ready", type=float, default=5.0, help="countdown before starting (s)")
     p.add_argument("--no-calibrate", action="store_true", help="skip the Pupil calibration at the start")

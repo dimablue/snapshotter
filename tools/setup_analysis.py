@@ -44,7 +44,7 @@ def main():
         request(key, 'convai/agents/' + created, method='DELETE')
         raise
     print('Configured analysis agent:', created)
-    print('No API key was saved. Run: python gazesnap.py --source mouse --wake')
+    print('No API key was saved. Run: python snapshotter.py --source mouse --wake')
 
 
 if __name__ == '__main__':

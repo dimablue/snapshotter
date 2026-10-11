@@ -72,7 +72,7 @@ def test_dots_avoid_the_markers():
     assert {p['name'] for p in phases} == {'still', 'pursuit', 'head', 'end'}
 
 
-def test_retime_moves_every_timestamp_gazesnap_reads():
+def test_retime_moves_every_timestamp_snapshotter_reads():
     msg = {'timestamp': 1.0, 'gaze_on_surfaces': [{'timestamp': 1.0}], 'fixations_on_surfaces': []}
     out = retime(msg, 10.0)
     assert out['timestamp'] == 11.0 and out['gaze_on_surfaces'][0]['timestamp'] == 11.0

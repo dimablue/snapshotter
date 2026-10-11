@@ -186,9 +186,9 @@ def test_voice_does_not_process_speaker_audio(monkeypatch):
 
 @pytest.fixture
 def app(monkeypatch):
-    from gazesnap import GazeSnapApp, parse_args
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--wake'])
-    app = GazeSnapApp(parse_args())
+    from snapshotter import SnapshotterApp, parse_args
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py', '--wake'])
+    app = SnapshotterApp(parse_args())
     yield app
     app.handle.close()
     app.resize_handle.close()
@@ -202,7 +202,7 @@ def test_wake_capture_automatically_starts_analysis(app, monkeypatch, tmp_path):
     app.analyzer = Mock()
     app.analyzer.analyze_async.return_value = 7
     app.args.no_sound = True
-    monkeypatch.setattr('gazesnap.grab_region', lambda *args: str(image))
+    monkeypatch.setattr('snapshotter.grab_region', lambda *args: str(image))
     app._finish_snap((0, 0, 40, 40))
     app.analyzer.analyze_async.assert_called_once_with(str(image))
     assert app.analysis_id == 7
@@ -211,7 +211,7 @@ def test_wake_capture_automatically_starts_analysis(app, monkeypatch, tmp_path):
 def test_failed_capture_never_uploads(app, monkeypatch):
     app.analyzer = Mock()
     def fail(*args): raise RuntimeError('screen recording denied')
-    monkeypatch.setattr('gazesnap.grab_region', fail)
+    monkeypatch.setattr('snapshotter.grab_region', fail)
     app._finish_snap((0, 0, 40, 40))
     app.analyzer.analyze_async.assert_not_called()
 

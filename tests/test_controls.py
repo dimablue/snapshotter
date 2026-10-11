@@ -8,7 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from voice_control import VoiceControl, is_capture_command
 from core import BoxTracker
-from gazesnap import GazeSnapApp, parse_args
+from snapshotter import SnapshotterApp, parse_args
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtTest import QTest
 
@@ -84,8 +84,8 @@ def test_rejected_key_is_forgotten(monkeypatch):
 
 
 def test_crop_saved_by_voice_retry_and_cancel(monkeypatch):
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--selection', 'crop'])
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py', '--selection', 'crop'])
+    app = SnapshotterApp(parse_args())
     snaps = []
     monkeypatch.setattr(app, 'snap', snaps.append)
     try:
@@ -109,8 +109,8 @@ def test_crop_saved_by_voice_retry_and_cancel(monkeypatch):
 
 
 def test_voice_start_drag_capture(monkeypatch):
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py'])
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py'])
+    app = SnapshotterApp(parse_args())
     snaps = []
     monkeypatch.setattr(app, 'snap', snaps.append)
     try:
@@ -154,8 +154,8 @@ def test_wake_mode_session(monkeypatch):
             self.stopped, self.alive = True, False
 
     monkeypatch.setattr(voice_control, 'VoiceControl', FakeVoice)
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--wake', '--selection-timeout', '5'])
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py', '--wake', '--selection-timeout', '5'])
+    app = SnapshotterApp(parse_args())
     snaps = []
     monkeypatch.setattr(app, 'snap', snaps.append)
     try:
@@ -194,9 +194,9 @@ def test_wake_mode_session(monkeypatch):
 
 def test_guided_gaze_check_fits_and_applies_correction(monkeypatch, tmp_path):
     import json
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--source', 'neon'])
-    monkeypatch.setattr(GazeSnapApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py', '--source', 'neon'])
+    monkeypatch.setattr(SnapshotterApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
+    app = SnapshotterApp(parse_args())
     try:
         app.start_check()
         assert app.overlay.check is None and app.check is not None  # drawn from the next tick
@@ -220,9 +220,9 @@ def test_guided_gaze_check_fits_and_applies_correction(monkeypatch, tmp_path):
 
 
 def test_gaze_check_refuses_skewed_correction(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--source', 'neon'])
-    monkeypatch.setattr(GazeSnapApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py', '--source', 'neon'])
+    monkeypatch.setattr(SnapshotterApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
+    app = SnapshotterApp(parse_args())
     try:
         app.start_check()
         t = time.monotonic()
@@ -243,8 +243,8 @@ def test_oversize_box_stays_on_screen():
 
 
 def test_drag_pause_and_follow(monkeypatch):
-    monkeypatch.setattr(sys, 'argv', ['gazesnap.py'])
-    app = GazeSnapApp(parse_args())
+    monkeypatch.setattr(sys, 'argv', ['snapshotter.py'])
+    app = SnapshotterApp(parse_args())
     try:
         app.tick()
         assert app.manual and app.handle.isVisible()
@@ -284,7 +284,7 @@ def test_drag_pause_and_follow(monkeypatch):
         assert app.snapping and not app.handle.isVisible()
         assert not app.resize_handle.isVisible()
         # Finish without accessing the user's screen.
-        monkeypatch.setattr('gazesnap.grab_region', Mock(side_effect=RuntimeError('test')))
+        monkeypatch.setattr('snapshotter.grab_region', Mock(side_effect=RuntimeError('test')))
         QTest.qWait(100)
         assert not app.snapping and not app.overlay.hidden_for_capture
     finally:

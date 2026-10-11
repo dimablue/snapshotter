@@ -171,7 +171,7 @@ def test_save_failure_preserves_draft_for_retry(app, tmp_path, monkeypatch):
     prepare(app, tmp_path)
     app.action_flow.follow_up('yes')
     app.action_flow.receive(result('draft', title='Note', body='Content'))
-    monkeypatch.setattr('gazesnap.save_draft', Mock(side_effect=OSError('disk full')))
+    monkeypatch.setattr('snapshotter.save_draft', Mock(side_effect=OSError('disk full')))
     app.handle_reply(12, 'yes')
     assert app.awaiting_reply and app.action_flow.result['stage'] == 'draft'
 

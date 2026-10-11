@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Snapshotter: look at something, blink, and it's captured (and optionally described aloud).
 
-    python gazesnap.py --source mouse            # cursor = gaze, Enter in this terminal = snap
-    python gazesnap.py --source webcam --narrate # real blinks from the laptop camera
-    python gazesnap.py --source neon --narrate   # Pupil Labs Neon over USB via Pupil Capture
-    python gazesnap.py --source neon --wake      # Siri-style: hidden until "hey Neon, take a screenshot"
+    python snapshotter.py --source mouse            # cursor = gaze, Enter in this terminal = snap
+    python snapshotter.py --source webcam --narrate # real blinks from the laptop camera
+    python snapshotter.py --source neon --narrate   # Pupil Labs Neon over USB via Pupil Capture
+    python snapshotter.py --source neon --wake      # Siri-style: hidden until "hey Neon, take a screenshot"
 
 Terminal commands while running (type, then Enter):
     (empty)  snap now      +/-  resize box      p  pause/resume
@@ -48,7 +48,7 @@ def parse_args():
                    help="seconds to wait for each spoken follow-up before disconnecting")
     p.add_argument("--model", default="claude-opus-5-5", help="Claude model for narration")
     p.add_argument("--voice", default=None, help="macOS `say` voice, e.g. Samantha")
-    p.add_argument("--out", default=os.path.expanduser("~/Pictures/GazeSnap"))
+    p.add_argument("--out", default=os.path.expanduser("~/Pictures/Snapshotter"))
     p.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
                    help="open each screenshot in Preview after taking it")
     p.add_argument("--box", nargs=2, type=int, default=[480, 300], metavar=("W", "H"))
@@ -101,7 +101,7 @@ def parse_args():
     return p.parse_args()
 
 
-class GazeSnapApp:
+class SnapshotterApp:
     def __init__(self, args):
         self.args = args
         self.app = QApplication.instance() or QApplication(sys.argv)
@@ -244,7 +244,7 @@ class GazeSnapApp:
             self.go_idle()
 
     def make_tray(self):
-        """Menu-bar icon: the only UI while GazeSnap sits in the background."""
+        """Menu-bar icon: the only UI while Snapshotter sits in the background."""
         pix = QPixmap(36, 36)
         pix.fill(QColor(0, 0, 0, 0))
         qp = QPainter(pix)
@@ -257,7 +257,7 @@ class GazeSnapApp:
         icon = QIcon(pix)
         icon.setIsMask(True)  # adapts to light/dark menu bar
         self.tray = QSystemTrayIcon(icon)
-        self.tray.setToolTip("GazeSnap: say “hey Neon, take a screenshot”")
+        self.tray.setToolTip("Snapshotter: say “hey Neon, take a screenshot”")
         menu = QMenu()
         menu.addAction("Say “hey Neon, take a screenshot”").setEnabled(False)
         pause = QAction("Pause listening", menu, checkable=True)
@@ -270,7 +270,7 @@ class GazeSnapApp:
         menu.addAction("Stop spoken analysis", self.cancel_analysis)
         menu.addAction("Open captures folder", lambda: os.system(f"open '{self.args.out}'"))
         menu.addSeparator()
-        menu.addAction("Quit GazeSnap", self.app.quit)
+        menu.addAction("Quit Snapshotter", self.app.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
         self._tray_menu = menu  # keep a reference
@@ -429,7 +429,7 @@ class GazeSnapApp:
     def log(self, msg):
         if self.overlay.idle and msg.startswith(("neon: no gaze on surface", "neon: no pupil data")):
             return  # markers are hidden between selections, so no surface gaze is expected
-        print(f"[gazesnap] {msg}", flush=True)
+        print(f"[snapshotter] {msg}", flush=True)
         if self.overlay.idle and not msg.startswith(("saved", "wake:", "analysis:", "capture failed", "voice: off")):
             return  # stay invisible between selections
         self.overlay.set_status(msg)
@@ -527,7 +527,7 @@ class GazeSnapApp:
         self.overlay.crop = self.crop if active else None
 
     # --- guided gaze check ("look at the dot") ------------------------------------
-    CORRECTION_PATH = os.path.expanduser("~/.cache/gazesnap/gaze_correction.json")
+    CORRECTION_PATH = os.path.expanduser("~/.cache/snapshotter/gaze_correction.json")
 
     def load_correction(self):
         if not self.source.needs_markers:
@@ -539,7 +539,7 @@ class GazeSnapApp:
             return None
         if saved.get("screen") != [self.screen_w, self.screen_h]:
             return None  # made for another display
-        self.log("using saved gaze correction (python gazesnap.py --check to redo it)")
+        self.log("using saved gaze correction (python snapshotter.py --check to redo it)")
         return saved["affine"]
 
     def start_check(self):
@@ -566,7 +566,7 @@ class GazeSnapApp:
         else:
             self.log(f"gaze check: average error {result['error_before']:.0f} px "
                      f"(worst {result['worst_before']:.0f} px) -> {result['error_after']:.0f} px corrected")
-            print("[gazesnap] offsets per dot (dx, dy px, rows top to bottom):", result["offsets"], flush=True)
+            print("[snapshotter] offsets per dot (dx, dy px, rows top to bottom):", result["offsets"], flush=True)
             (a, b, _), (d, e, _) = result["affine"]
             plausible = (abs(b) < 0.15 and abs(d) < 0.15 and 0.75 < a < 1.3 and 0.75 < e < 1.3
                          and result["error_after"] < 80)
@@ -756,7 +756,7 @@ class GazeSnapApp:
         if not self.args.wake:
             hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
                 else "long blink or double blink"
-            self.log(f"GazeSnap ({self.args.source}): look at something, {hint} to snap")
+            self.log(f"Snapshotter ({self.args.source}): look at something, {hint} to snap")
         code = self.app.exec()
         self.cancel_analysis()
         if self.analyzer:
@@ -792,4 +792,4 @@ def hide_dock_icon():
 
 
 if __name__ == "__main__":
-    sys.exit(GazeSnapApp(parse_args()).run())
+    sys.exit(SnapshotterApp(parse_args()).run())

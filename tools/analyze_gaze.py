@@ -6,7 +6,7 @@ better correction would help. Needs no hardware.
     python tools/analyze_gaze.py recordings/<date_time> --plot     # also saves analysis.png
     python tools/analyze_gaze.py recordings/<date_time> --distance-cm 55
 
-Errors are in screen points (what GazeSnap works in) and degrees of visual angle (what Pupil
+Errors are in screen points (what Snapshotter works in) and degrees of visual angle (what Pupil
 reports), using the screen's physical size and --distance-cm.
 """
 import argparse
@@ -19,7 +19,7 @@ from pathlib import Path
 import msgpack
 import numpy as np
 
-MIN_CONFIDENCE = 0.6  # GazeSnap's --min-confidence default
+MIN_CONFIDENCE = 0.6  # Snapshotter's --min-confidence default
 
 
 # --- loading -------------------------------------------------------------------
@@ -39,7 +39,7 @@ def decode(messages, prefix):
 
 
 def screen_gaze(meta, messages):
-    """Surface gaze in screen points, as GazeSnap maps it: array of (t, x, y, confidence),
+    """Surface gaze in screen points, as Snapshotter maps it: array of (t, x, y, confidence),
     t in monotonic seconds from Pupil's timestamp."""
     left, top, right, bottom = meta["span"]
     rows = []
@@ -105,7 +105,7 @@ def fit(kind, measured, targets):
 
 def per_dot(gaze, windows):
     """[(phase, target, median gaze or None, sample count, precision)] with precision the RMS
-    distance of samples from their median (the noise GazeSnap has to smooth)."""
+    distance of samples from their median (the noise Snapshotter has to smooth)."""
     ok = gaze[gaze[:, 3] >= MIN_CONFIDENCE] if len(gaze) else gaze
     out = []
     for phase, _, target, t0, t1 in windows:

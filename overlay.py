@@ -35,7 +35,7 @@ def marker_layout(g, size):
 class Overlay(QWidget):
     def __init__(self, screen_geometry, show_gaze=True):
         super().__init__()
-        self.setWindowTitle("GazeSnap")
+        self.setWindowTitle("Snapshotter")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.NoDropShadowWindowHint

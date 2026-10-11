@@ -11,7 +11,7 @@ def grab_region(rect, out_dir):
     """rect = (left, top, w, h) in logical points (mss on macOS uses the same). Returns the PNG path."""
     left, top, w, h = rect
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, time.strftime("gazesnap-%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}.png")
+    path = os.path.join(out_dir, time.strftime("snapshotter-%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}.png")
     with mss.MSS() if hasattr(mss, "MSS") else mss.mss() as sct:
         shot = sct.grab({"left": left, "top": top, "width": w, "height": h})
         mss.tools.to_png(shot.rgb, shot.size, output=path)

@@ -36,7 +36,7 @@ def main():
               "(Pupil Remote plugin must be on; it is by default.)")
         return
     print(f"Connected to Pupil Capture {version}. Recording for {a.seconds:.0f} s, starting now:\n"
-          "  with GazeSnap's markers on screen, look at each screen corner for ~2 s "
+          "  with Snapshotter's markers on screen, look at each screen corner for ~2 s "
           "(top-left, top-right, bottom-right, bottom-left), and blink a few times.")
 
     sub = ctx.socket(zmq.SUB)
@@ -91,8 +91,8 @@ def main():
                 print(f"  gaze reached x {xs[lo]:.2f}..{xs[hi]:.2f}, y {ys[lo]:.2f}..{ys[hi]:.2f} "
                       "(look at all four corners: both should span about 0..1)")
     else:
-        print("no surface data (fine for now; GazeSnap's markers must be on screen for this)")
-    print("\nNext: python gazesnap.py --source neon")
+        print("no surface data (fine for now; Snapshotter's markers must be on screen for this)")
+    print("\nNext: python snapshotter.py --source neon")
 
 
 if __name__ == "__main__":
