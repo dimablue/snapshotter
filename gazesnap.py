@@ -22,6 +22,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QSystemTrayIcon
 
+from action_flow import ActionFlow, reply_intent, save_draft
 from capture import grab_region, play_shutter
 from core import BlinkDetector, BoxTracker, GazeFilter, CropSelector
 from overlay import Overlay, DragHandle, ResizeHandle
@@ -34,6 +35,13 @@ def parse_args():
     p.add_argument("--dwell-ms", type=int, default=800)
     p.add_argument("--source", choices=SOURCE_NAMES, default="mouse")
     p.add_argument("--narrate", action="store_true", help="describe each snap with Claude and speak it")
+    p.add_argument("--analysis", action=argparse.BooleanOptionalAction, default=None,
+                   help="ElevenLabs spoken image analysis (on by default with --wake)")
+    p.add_argument("--analysis-agent", default=None, help="ElevenLabs image-capable agent ID")
+    p.add_argument("--items-out", default=None,
+                   help="local draft folder (default: <screenshot folder>/Items)")
+    p.add_argument("--reply-timeout", type=float, default=30,
+                   help="seconds to wait for each spoken follow-up before disconnecting")
     p.add_argument("--model", default="claude-opus-5-5", help="Claude model for narration")
     p.add_argument("--voice", default=None, help="macOS `say` voice, e.g. Samantha")
     p.add_argument("--out", default=os.path.expanduser("~/Pictures/GazeSnap"))
@@ -104,6 +112,15 @@ class GazeSnapApp:
         self.resize_handle = ResizeHandle()
         self.resize_handle.moved.connect(self.resize_box)
         self.voice_control = None
+        self.analyzer = None
+        self.analysis_enabled = args.analysis if args.analysis is not None else (args.wake and not args.narrate)
+        self.analysis_id = None
+        self.analysis_speaking = False
+        self.analysis_error = False
+        self.action_flow = ActionFlow()
+        self.reply_token = 0
+        self.reply_deadline = None
+        self.awaiting_reply = False
         self.mic = self.wake = None
         self.pending_start = None  # wake fired; pin the first corner on the next fresh gaze sample
         self.selection_deadline = None
@@ -160,8 +177,9 @@ class GazeSnapApp:
         if get_api_key():
             return True
         key, accepted = QInputDialog.getText(
-            None, "Enable ElevenLabs voice commands",
-            "Microphone audio streams to ElevenLabs while voice commands are on.\n"
+            None, "Connect Snapshotter to ElevenLabs",
+            "Captures are uploaded when analysis is enabled. Microphone audio streams\n"
+            "while voice commands are on.\n"
             "Enter your ElevenLabs API key (kept only for this session):",
             QLineEdit.EchoMode.Password)
         if not accepted or not key.strip():
@@ -172,8 +190,9 @@ class GazeSnapApp:
     # --- wake mode ("hey Neon, take a screenshot") ----------------------------------
     def wake_up(self):
         """Wake phrase heard: show the overlay, connect ElevenLabs, start a selection."""
-        if self.paused or self.snapping:
+        if self.paused or self.snapping or self.analysis_speaking:
             return
+        self.cancel_analysis()
         self.overlay.idle = False
         self.pending_start = time.monotonic()
         self.selection_deadline = time.monotonic() + self.args.selection_timeout
@@ -220,6 +239,11 @@ class GazeSnapApp:
         pause = QAction("Pause listening", menu, checkable=True)
         pause.toggled.connect(self.set_listening_paused)
         menu.addAction(pause)
+        analysis = QAction("Spoken image analysis", menu, checkable=True)
+        analysis.setChecked(self.analysis_enabled)
+        analysis.toggled.connect(self.set_analysis_enabled)
+        menu.addAction(analysis)
+        menu.addAction("Stop spoken analysis", self.cancel_analysis)
         menu.addAction("Open captures folder", lambda: os.system(f"open '{self.args.out}'"))
         menu.addSeparator()
         menu.addAction("Quit GazeSnap", self.app.quit)
@@ -231,6 +255,7 @@ class GazeSnapApp:
         if self.wake:
             self.wake.paused = paused
         if paused:
+            self.cancel_analysis()
             self.finish_voice_selection()
         self.log("wake: paused" if paused else "wake: listening")
 
@@ -243,9 +268,143 @@ class GazeSnapApp:
             self.narrate = False
             self.log(f"narration off: {e}")
 
+    def _make_analyzer(self):
+        try:
+            from image_analyzer import ElevenLabsAnalyzer, agent_id
+            agent = self.args.analysis_agent or agent_id()
+            if not agent:
+                self.log("analysis: off — run python tools/setup_analysis.py first")
+                return False
+            if not self.ensure_api_key():
+                self.log("analysis: off — no ElevenLabs key provided")
+                return False
+            self.analyzer = ElevenLabsAnalyzer(self.events, agent, configure=True)
+            return True
+        except Exception as exc:
+            self.log(f"analysis: off ({type(exc).__name__}); install requirements-voice.txt")
+            return False
+
+    def _mute_for_analysis(self, muted):
+        self.analysis_speaking = muted
+        for listener in (self.wake, self.voice_control):
+            if listener:
+                listener.set_output_muted(muted)
+
+    def stop_reply(self):
+        self.reply_token += 1
+        self.awaiting_reply = False
+        self.reply_deadline = None
+        if self.voice_control:
+            if self.args.wake:
+                threading.Thread(target=self.voice_control.stop, daemon=True).start()
+                self.voice_control = None
+            else:
+                self.voice_control.set_reply_mode(None)
+
+    def listen_for_reply(self):
+        if self.paused or (self.wake and self.wake.paused):
+            return
+        self.reply_token += 1
+        self.awaiting_reply = True
+        self.reply_deadline = time.monotonic() + max(1, self.args.reply_timeout)
+        if self.voice_control is None or not self.voice_control.alive:
+            from voice_control import VoiceControl
+            self.voice_control = VoiceControl(self.events, self.mic,
+                ready="listening for your reply — say yes, no, or your question")
+            self.voice_control.set_reply_mode(self.reply_token)
+            self.voice_control.set_output_muted(False)  # discard the speaker's trailing audio
+            self.voice_control.start()
+        else:
+            self.voice_control.set_reply_mode(self.reply_token)
+        self.log("analysis: listening for your reply (yes, no, or a question)")
+
+    def handle_reply(self, token, text):
+        if token != self.reply_token or not self.awaiting_reply or self.paused:
+            return
+        text = text.strip()
+        if not text:
+            return
+        intent = reply_intent(text)
+        if intent == 'dismiss':
+            self.cancel_analysis()
+            self.log("analysis: dismissed; wake listening resumed")
+            return
+        result = self.action_flow.result
+        if not result:
+            return
+        if intent == 'accept' and result['stage'] == 'draft':
+            try:
+                from pathlib import Path
+                root = self.args.items_out or str(Path(self.args.out) / 'Items')
+                paths = save_draft(self.action_flow, root)
+            except (ValueError, OSError) as exc:
+                self.log(f"analysis: could not save draft ({type(exc).__name__}); say yes to retry")
+                self.reply_deadline = time.monotonic() + max(1, self.args.reply_timeout)
+                return
+            self.cancel_analysis()
+            self.log("analysis: saved local draft — " + ', '.join(map(str, paths)))
+            return
+        try:
+            prompt = self.action_flow.follow_up(text)
+        except ValueError as exc:
+            self.cancel_analysis()
+            self.log("analysis: " + str(exc))
+            return
+        self.stop_reply()
+        self.analysis_id = self.analyzer.analyze_async(self.action_flow.image, prompt=prompt)
+
+    def cancel_analysis(self):
+        self.stop_reply()
+        self.action_flow.reset()
+        if self.analyzer:
+            self.analyzer.cancel()
+        self.analysis_id = None
+        if self.analysis_speaking:
+            self._mute_for_analysis(False)
+
+    def set_analysis_enabled(self, enabled):
+        self.analysis_enabled = enabled
+        if not enabled:
+            self.cancel_analysis()
+        elif self.analyzer is None:
+            self._make_analyzer()
+        self.log(f"analysis: {'on' if enabled and self.analyzer else 'off'}")
+
+    def analysis_event(self, ev):
+        kind, generation = ev[:2]
+        if generation != self.analysis_id:
+            return  # a newer capture, toggle, or cancellation invalidated this result
+        if kind == "analysis_started":
+            self.analysis_error = False
+            self.log("analysis: analyzing screenshot…")
+        elif kind == "speech_started":
+            self._mute_for_analysis(True)
+            self.log("analysis: speaking…")
+            ev[2].set()  # only start speaker output after listeners have been gated
+        elif kind == "analysis_result":
+            try:
+                self.action_flow.receive(ev[2])
+            except ValueError:
+                self.analysis_error = True
+                self.log("analysis: invalid draft result; capture again to retry")
+        elif kind == "analysis_text":
+            print(f"[analysis] {ev[2]}", flush=True)
+        elif kind == "analysis_failed":
+            self.analysis_error = True
+            self.log("analysis: " + ev[2])
+        elif kind == "analysis_finished":
+            if self.analysis_speaking:
+                self._mute_for_analysis(False)
+            self.analysis_id = None
+            if not self.analysis_error:
+                if self.action_flow.result and self.action_flow.result['action'] != 'none':
+                    self.listen_for_reply()
+                else:
+                    self.log("analysis: finished")
+
     def log(self, msg):
         print(f"[gazesnap] {msg}", flush=True)
-        if self.overlay.idle and not msg.startswith(("saved", "wake:", "capture failed", "voice: off")):
+        if self.overlay.idle and not msg.startswith(("saved", "wake:", "analysis:", "capture failed", "voice: off")):
             return  # stay invisible between selections
         self.overlay.set_status(msg)
         if msg.startswith("voice:"):
@@ -283,10 +442,21 @@ class GazeSnapApp:
                         self.snap(self.tracker.rect_before(start))
             elif kind == "status":
                 self.log(ev[1])
+            elif kind == "reply":
+                self.handle_reply(ev[1], ev[2])
             elif kind == "cmd":
-                self.command(ev[1])
+                if self.awaiting_reply and ev[1] not in ('q', 'p', 's', 'a', 'v', 'start'):
+                    self.handle_reply(self.reply_token, ev[1])
+                    continue
+                if not self.analysis_speaking or ev[1] not in ("start", "capture", "r", "cancel"):
+                    self.command(ev[1])
+            elif kind in ("analysis_started", "analysis_result", "analysis_text", "speech_started", "analysis_failed", "analysis_finished"):
+                self.analysis_event(ev)
 
         now = time.monotonic()
+        if self.reply_deadline is not None and now > self.reply_deadline:
+            self.cancel_analysis()
+            self.log("analysis: reply timed out; wake listening resumed")
         if self.pending_start is not None and now - self.pending_start > 2:
             self.pending_start = None  # no fresh gaze (markers not found yet?): use the last known
             self.log("no fresh gaze yet; starting from the last known point")
@@ -362,6 +532,8 @@ class GazeSnapApp:
         elif cmd == "p":
             self.paused = not self.paused
             self.crop.clear_dwell()
+            if self.paused:
+                self.cancel_analysis()
             self.log("paused" if self.paused else "resumed")
         elif cmd == "m":
             self.manual = not self.manual
@@ -375,17 +547,22 @@ class GazeSnapApp:
             if self.narrate and self.narrator is None:
                 self._make_narrator()
             self.log(f"narration {'on' if self.narrate else 'off'}")
+        elif cmd == "a":
+            self.set_analysis_enabled(not self.analysis_enabled)
+        elif cmd == "s":
+            self.cancel_analysis()
         elif cmd == "q":
             self.app.quit()
         else:
             print("commands: Enter=snap/save crop  start=new selection at gaze  c=crop toggle  r=retry  "
                   "+/-=resize  p=pause  "
-                  "m=manual/follow  v=voice  n=narration  q=quit", flush=True)
+                  "m=manual/follow  v=voice  n=narration  a=analysis  s=stop speech  q=quit", flush=True)
 
     # --- capture ----------------------------------------------------------------
     def snap(self, rect):
         if self.snapping or self.paused:
             return
+        self.cancel_analysis()
         self.snapping = True
         self.handle.hide()
         self.resize_handle.hide()
@@ -415,7 +592,10 @@ class GazeSnapApp:
         self.overlay.flash(rect)
         self.app.clipboard().setImage(QImage(path))
         self.log(f"saved {path}")
-        if self.narrate and self.narrator:
+        if self.analysis_enabled and self.analyzer:
+            self.action_flow.reset(path)
+            self.analysis_id = self.analyzer.analyze_async(path)
+        elif self.narrate and self.narrator:
             self.overlay.set_status("Describing…", 10)
             self.narrator.describe_async(path)
 
@@ -442,6 +622,8 @@ class GazeSnapApp:
     def run(self):
         signal.signal(signal.SIGINT, lambda *_: self.app.quit())
         threading.Thread(target=self._read_stdin, daemon=True).start()
+        if self.analysis_enabled:
+            self._make_analyzer()
         self.source.start()
         if self.args.wake:
             self.start_wake()
@@ -453,6 +635,9 @@ class GazeSnapApp:
                 else "long blink or double blink"
             self.log(f"GazeSnap ({self.args.source}): look at something, {hint} to snap")
         code = self.app.exec()
+        self.cancel_analysis()
+        if self.analyzer:
+            self.analyzer.close()
         self.source.stop()
         if self.wake:
             self.wake.stop()
