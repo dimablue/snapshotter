@@ -4,6 +4,7 @@
     python gazesnap.py --source mouse            # cursor = gaze, Enter in this terminal = snap
     python gazesnap.py --source webcam --narrate # real blinks from the laptop camera
     python gazesnap.py --source neon --narrate   # Pupil Labs Neon over USB via Pupil Capture
+    python gazesnap.py --source neon --wake      # Siri-style: hidden until "hey Neon, take a screenshot"
 
 Terminal commands while running (type, then Enter):
     (empty)  snap now      +/-  resize box      p  pause/resume
@@ -18,8 +19,8 @@ import threading
 import time
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QCursor, QImage
-from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit
+from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QSystemTrayIcon
 
 from capture import grab_region, play_shutter
 from core import BlinkDetector, BoxTracker, GazeFilter, CropSelector
@@ -42,6 +43,11 @@ def parse_args():
     p.add_argument("--position", choices=["manual", "follow"], default=None,
                    help="default: manual with mouse/webcam, follow with Neon")
     p.add_argument("--voice-control", action="store_true", help="listen with ElevenLabs for screenshot commands")
+    p.add_argument("--wake", action="store_true",
+                   help="Siri-style: hidden until you say “hey Neon, take a screenshot” (detected offline); "
+                        "ElevenLabs only listens during the selection")
+    p.add_argument("--selection-timeout", type=float, default=30,
+                   help="with --wake, drop a selection (and disconnect ElevenLabs) after this many seconds")
     p.add_argument("--no-blink-capture", action="store_true", help="capture only with Enter or voice")
     # smoothing
     p.add_argument("--min-cutoff", type=float, default=1.0, help="lower = smoother, laggier box")
@@ -98,6 +104,10 @@ class GazeSnapApp:
         self.resize_handle = ResizeHandle()
         self.resize_handle.moved.connect(self.resize_box)
         self.voice_control = None
+        self.mic = self.wake = None
+        self.pending_start = None  # wake fired; pin the first corner on the next fresh gaze sample
+        self.selection_deadline = None
+        self.tray = None
         self.detector = BlinkDetector(args.long_blink_ms, args.long_blink_max_ms,
                                       args.double_window_ms, args.cooldown_ms, args.blink_gesture)
         self.narrator = None
@@ -111,6 +121,7 @@ class GazeSnapApp:
         self.last_gaze = None
         self.gaze_xy = None  # latest filtered gaze/cursor, where voice pins the first corner
         self.overlay.crop = self.crop if self.crop_active else None
+        self.overlay.idle = args.wake
         self.paused = False
         self.snapping = False
         self.timer = QTimer()
@@ -136,20 +147,92 @@ class GazeSnapApp:
                 self.log("ElevenLabs microphone off")
                 return
             # voice had already stopped (e.g. rejected key): start it again
-        if not os.environ.get("ELEVENLABS_API_KEY"):
-            key, accepted = QInputDialog.getText(
-                None, "Enable ElevenLabs voice commands",
-                "Microphone audio streams to ElevenLabs while enabled.\n"
-                "Enter your ElevenLabs API key (kept only for this session):",
-                QLineEdit.EchoMode.Password)
-            if not accepted or not key.strip():
-                self.log("Voice off: no ElevenLabs key provided; type v + Enter to retry")
-                return
-            os.environ["ELEVENLABS_API_KEY"] = key.strip()
+        if not self.ensure_api_key():
+            self.log("Voice off: no ElevenLabs key provided; type v + Enter to retry")
+            return
         from voice_control import VoiceControl
         self.voice_control = VoiceControl(self.events)
         self.overlay.voice_status = "Voice: connecting to ElevenLabs…"
         self.voice_control.start()
+
+    def ensure_api_key(self):
+        from voice_control import get_api_key
+        if get_api_key():
+            return True
+        key, accepted = QInputDialog.getText(
+            None, "Enable ElevenLabs voice commands",
+            "Microphone audio streams to ElevenLabs while voice commands are on.\n"
+            "Enter your ElevenLabs API key (kept only for this session):",
+            QLineEdit.EchoMode.Password)
+        if not accepted or not key.strip():
+            return False
+        os.environ["ELEVENLABS_API_KEY"] = key.strip()
+        return True
+
+    # --- wake mode ("hey Neon, take a screenshot") ----------------------------------
+    def wake_up(self):
+        """Wake phrase heard: show the overlay, connect ElevenLabs, start a selection."""
+        if self.paused or self.snapping:
+            return
+        self.overlay.idle = False
+        self.pending_start = time.monotonic()
+        self.selection_deadline = time.monotonic() + self.args.selection_timeout
+        if self.voice_control is None or not self.voice_control.alive:
+            from voice_control import VoiceControl
+            # skip 0.8 s so the tail of "…take a screenshot" isn't heard as "screenshot"
+            self.voice_control = VoiceControl(self.events, self.mic, skip_s=0.8,
+                                              ready="listening — say “capture”, “retry” or “cancel”")
+            self.voice_control.start()
+
+    def go_idle(self):
+        """Selection over: hide the overlay and disconnect ElevenLabs (the offline wake
+        listener keeps running)."""
+        self.overlay.idle = True
+        self.overlay.update()  # clear the selection from the screen
+        self.pending_start = self.selection_deadline = None
+        if self.voice_control is not None:
+            # stop() waits for the thread; don't block the UI on it
+            threading.Thread(target=self.voice_control.stop, daemon=True).start()
+            self.voice_control = None
+
+    def finish_voice_selection(self):
+        self.set_crop_active(self.args.selection == "crop" and not self.args.wake)
+        if self.args.wake:
+            self.go_idle()
+
+    def make_tray(self):
+        """Menu-bar icon: the only UI while GazeSnap sits in the background."""
+        pix = QPixmap(36, 36)
+        pix.fill(QColor(0, 0, 0, 0))
+        qp = QPainter(pix)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        qp.setPen(QPen(QColor(0, 0, 0), 3))
+        qp.drawEllipse(4, 10, 28, 16)  # an eye
+        qp.setBrush(QColor(0, 0, 0))
+        qp.drawEllipse(13, 13, 10, 10)
+        qp.end()
+        icon = QIcon(pix)
+        icon.setIsMask(True)  # adapts to light/dark menu bar
+        self.tray = QSystemTrayIcon(icon)
+        self.tray.setToolTip("GazeSnap: say “hey Neon, take a screenshot”")
+        menu = QMenu()
+        menu.addAction("Say “hey Neon, take a screenshot”").setEnabled(False)
+        pause = QAction("Pause listening", menu, checkable=True)
+        pause.toggled.connect(self.set_listening_paused)
+        menu.addAction(pause)
+        menu.addAction("Open captures folder", lambda: os.system(f"open '{self.args.out}'"))
+        menu.addSeparator()
+        menu.addAction("Quit GazeSnap", self.app.quit)
+        self.tray.setContextMenu(menu)
+        self.tray.show()
+        self._tray_menu = menu  # keep a reference
+
+    def set_listening_paused(self, paused):
+        if self.wake:
+            self.wake.paused = paused
+        if paused:
+            self.finish_voice_selection()
+        self.log("wake: paused" if paused else "wake: listening")
 
     def _make_narrator(self):
         try:
@@ -162,6 +245,8 @@ class GazeSnapApp:
 
     def log(self, msg):
         print(f"[gazesnap] {msg}", flush=True)
+        if self.overlay.idle and not msg.startswith(("saved", "wake:", "capture failed", "voice: off")):
+            return  # stay invisible between selections
         self.overlay.set_status(msg)
         if msg.startswith("voice:"):
             self.overlay.voice_status = msg
@@ -184,11 +269,15 @@ class GazeSnapApp:
                     self.tracker.update(fx, fy, t)
                 self.last_gaze = t
                 self.gaze_xy = (fx, fy)
+                if self.pending_start is not None and t >= self.pending_start:
+                    self.pending_start = None
+                    self.start_selection()
                 if self.crop_active and not self.paused and not self.snapping and time.monotonic() - t <= 0.25:
                     self.crop.update(fx, fy, t)
             elif kind == "blink":
                 _, t0, t1 = ev
-                if not self.paused and not self.args.no_blink_capture and not self.crop_active:
+                if not self.paused and not self.args.no_blink_capture and not self.crop_active \
+                        and not self.args.wake:
                     start = self.detector.on_blink(t0, t1)
                     if start is not None:
                         self.snap(self.tracker.rect_before(start))
@@ -197,19 +286,31 @@ class GazeSnapApp:
             elif kind == "cmd":
                 self.command(ev[1])
 
-        if self.crop_active and (self.last_gaze is None or time.monotonic() - self.last_gaze > 0.25):
+        now = time.monotonic()
+        if self.pending_start is not None and now - self.pending_start > 2:
+            self.pending_start = None  # no fresh gaze (markers not found yet?): use the last known
+            self.log("no fresh gaze yet; starting from the last known point")
+            self.start_selection()
+        if self.selection_deadline is not None and now > self.selection_deadline:
+            self.log("selection timed out")
+            self.finish_voice_selection()
+        if self.crop_active and (self.last_gaze is None or now - self.last_gaze > 0.25):
             self.crop.clear_dwell()
         self.overlay.box = self.tracker.current_rect()
         self.overlay.gaze = (self.tracker.x, self.tracker.y)
         self.overlay.stable = self.tracker.stable
         self.overlay.paused = self.paused
         left, top, width, height = self.overlay.box
-        show_handles = self.manual and not self.paused and not self.snapping and not self.crop_active
+        show_handles = self.manual and not self.paused and not self.snapping and not self.crop_active \
+            and not self.args.wake
         self.handle.move(left, top)
         self.handle.setVisible(show_handles)
         self.resize_handle.move(left + width - 26, top + height - 26)
         self.resize_handle.setVisible(show_handles)
-        self.overlay.update()
+        # while idle in wake mode, tick slowly and repaint only for toasts and the capture flash
+        self.timer.setInterval(100 if self.overlay.idle else 16)
+        if not self.overlay.idle or now < max(self.overlay.status_until, self.overlay.flash_until) + 0.2:
+            self.overlay.update()
 
     def set_crop_active(self, active):
         self.crop_active = active
@@ -228,7 +329,9 @@ class GazeSnapApp:
         self.log("selection started: look at the opposite corner, then say “capture”")
 
     def command(self, cmd):
-        if cmd == "start":  # "hey Neon, take a screenshot"
+        if cmd == "start" and self.args.wake:  # offline wake phrase
+            self.wake_up()
+        elif cmd == "start":  # "hey Neon, take a screenshot"
             self.start_selection()
         elif cmd == "capture" or (cmd == "" and self.crop_active):  # voice, or Enter in crop mode
             if self.crop_active and self.crop.has_rect():
@@ -240,6 +343,9 @@ class GazeSnapApp:
                 self.log("say “hey Neon, take a screenshot” to start a selection")
         elif cmd == "":
             self.snap(self.tracker.current_rect())
+        elif cmd == "cancel" and self.crop_by_voice:
+            self.finish_voice_selection()
+            self.log("selection cancelled")
         elif cmd == "c" or (cmd == "cancel" and self.crop_active):
             self.set_crop_active(not self.crop_active)
             self.log("crop mode" if self.crop_active else "box mode")
@@ -301,7 +407,7 @@ class GazeSnapApp:
                 self.crop.state = "preview"
             return
         if self.crop_by_voice:
-            self.set_crop_active(self.args.selection == "crop")  # back to how it was launched
+            self.finish_voice_selection()
         elif self.crop_active:
             self.crop.reset()
         if not self.args.no_sound:
@@ -314,6 +420,21 @@ class GazeSnapApp:
             self.narrator.describe_async(path)
 
     # --- run ----------------------------------------------------------------
+    def start_wake(self):
+        from mic import Microphone
+        from wake import WakeListener
+        hide_dock_icon()
+        self.make_tray()
+        self.ensure_api_key()  # ask now, not in the middle of the first selection
+        self.mic = Microphone()
+        try:
+            self.mic.start()
+        except Exception as e:
+            self.log(f"wake: off — microphone unavailable ({type(e).__name__})")
+            return
+        self.wake = WakeListener(self.events, self.mic)
+        self.wake.start()
+
     def _read_stdin(self):
         for line in sys.stdin:
             self.events.put(("cmd", line.strip()))
@@ -322,19 +443,44 @@ class GazeSnapApp:
         signal.signal(signal.SIGINT, lambda *_: self.app.quit())
         threading.Thread(target=self._read_stdin, daemon=True).start()
         self.source.start()
-        if self.args.voice_control:
+        if self.args.wake:
+            self.start_wake()
+        elif self.args.voice_control:
             QTimer.singleShot(0, self.toggle_voice)
         self.timer.start(16)  # ~60 Hz; also lets Python handle Ctrl+C
-        hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
-            else "long blink or double blink"
-        self.log(f"GazeSnap ({self.args.source}): look at something, {hint} to snap")
+        if not self.args.wake:
+            hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
+                else "long blink or double blink"
+            self.log(f"GazeSnap ({self.args.source}): look at something, {hint} to snap")
         code = self.app.exec()
         self.source.stop()
+        if self.wake:
+            self.wake.stop()
         if self.voice_control:
             self.voice_control.stop()
+        if self.mic:
+            self.mic.stop()
         self.handle.close()
         self.resize_handle.close()
         return code
+
+
+def hide_dock_icon():
+    """Run as a menu-bar-only app, like Siri: no Dock icon (macOS, via the Objective-C runtime)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc.objc_getClass.restype = objc.sel_registerName.restype = ctypes.c_void_p
+        send = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        set_policy = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)(
+            ("objc_msgSend", objc))
+        ns_app = send(objc.objc_getClass(b"NSApplication"), objc.sel_registerName(b"sharedApplication"))
+        set_policy(ns_app, objc.sel_registerName(b"setActivationPolicy:"), 1)  # Accessory
+    except Exception:
+        pass  # cosmetic only
 
 
 if __name__ == "__main__":

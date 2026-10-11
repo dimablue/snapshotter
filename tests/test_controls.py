@@ -1,6 +1,7 @@
 import os
 import queue
 import sys
+import time
 from unittest.mock import Mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -131,6 +132,53 @@ def test_voice_start_drag_capture(monkeypatch):
         app.crop_by_voice, app.crop.state = False, 'second'
         app.command('cancel')
         assert not app.crop_active
+    finally:
+        app.handle.close()
+        app.resize_handle.close()
+        app.overlay.close()
+
+
+def test_wake_mode_session(monkeypatch):
+    import voice_control
+    sessions = []
+
+    class FakeVoice:
+        def __init__(self, events, mic=None, skip_s=0.0, ready=''):
+            self.skip_s, self.stopped, self.alive = skip_s, False, True
+            sessions.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.stopped, self.alive = True, False
+
+    monkeypatch.setattr(voice_control, 'VoiceControl', FakeVoice)
+    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--wake', '--selection-timeout', '5'])
+    app = GazeSnapApp(parse_args())
+    snaps = []
+    monkeypatch.setattr(app, 'snap', snaps.append)
+    try:
+        assert app.overlay.idle and not app.crop_active  # invisible until the wake phrase
+        app.log('neon: no gaze on surface')  # tracker chatter stays out of sight while idle
+        assert app.overlay.status == ''
+        app.command('start')  # "hey Neon, take a screenshot", heard offline
+        assert not app.overlay.idle and len(sessions) == 1 and sessions[0].skip_s > 0
+        app.events.put(('gaze', 300, 200, time.monotonic() + 0.01))
+        app.tick()  # the first corner is pinned on the next fresh gaze sample
+        assert app.crop.state == 'second' and app.crop_by_voice
+        app.command('cancel')
+        QTest.qWait(50)
+        assert app.overlay.idle and not app.crop_active and sessions[0].stopped
+        app.command('start')  # a new session; then let it time out
+        assert len(sessions) == 2
+        app.selection_deadline = time.monotonic() - 1
+        app.tick()
+        QTest.qWait(50)
+        assert app.overlay.idle and sessions[1].stopped
+        app.events.put(('blink', 1.0, 1.6))  # blinks never capture in wake mode
+        app.tick()
+        assert snaps == []
     finally:
         app.handle.close()
         app.resize_handle.close()

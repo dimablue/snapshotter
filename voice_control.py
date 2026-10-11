@@ -4,7 +4,9 @@ import json
 import os
 import queue
 import re
+import subprocess
 import threading
+import time
 
 
 # Voice commands sent to the app as ("cmd", name):
@@ -85,13 +87,36 @@ def is_capture_command(text):
     return voice_command(text) == "capture"
 
 
+KEYCHAIN_SERVICE = "gazesnap-elevenlabs"
+
+
+def get_api_key():
+    """$ELEVENLABS_API_KEY, else the key saved in the macOS Keychain (see README)."""
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    if key:
+        return key
+    try:
+        out = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
 class VoiceError(RuntimeError):
     """An ElevenLabs error whose message is safe and useful to show as-is."""
 
 
 class VoiceControl:
-    def __init__(self, events):
+    def __init__(self, events, mic=None, skip_s=0.0,
+                 ready="listening — say “hey Neon, take a screenshot”"):
+        """`mic`: a shared mic.Microphone (else opens its own stream). `skip_s`: drop this much
+        audio at the start, e.g. the tail of the wake phrase that started the session.
+        `ready`: status shown once ElevenLabs is listening."""
         self.events = events
+        self.ready = ready
+        self.mic = mic
+        self.skip_s = skip_s
         self._stop = threading.Event()
         self._thread = None
         self._socket = None
@@ -103,7 +128,7 @@ class VoiceControl:
     def handle_message(self, message):
         kind = message.get("message_type", "")
         if kind == "session_started":
-            self.status('listening — say “hey Neon, take a screenshot”')
+            self.status(self.ready)
         elif kind in ("partial_transcript", "committed_transcript"):
             final = kind == "committed_transcript"
             text = message.get("text", "").strip()
@@ -143,42 +168,57 @@ class VoiceControl:
         if self._thread:
             self._thread.join(timeout=2)
 
+    def _audio(self, on_audio):
+        """Context manager feeding mic blocks to on_audio(bytes)."""
+        import contextlib
+
+        if self.mic is not None:
+            @contextlib.contextmanager
+            def shared():
+                self.mic.subscribe(on_audio)
+                try:
+                    yield
+                finally:
+                    self.mic.unsubscribe(on_audio)
+            return shared()
+        import sounddevice as sd
+        return sd.RawInputStream(samplerate=16000, channels=1, dtype="int16", blocksize=1600,
+                                 callback=lambda data, frames, timing, status: on_audio(bytes(data)))
+
     def run(self):
         try:
-            key = os.environ.get("ELEVENLABS_API_KEY")
+            key = get_api_key()
             if not key:
-                self.status("off — set ELEVENLABS_API_KEY and restart with --voice-control")
+                self.status("off — set ELEVENLABS_API_KEY (or save it in the Keychain) and restart")
                 return
-            import sounddevice as sd
             from websockets.sync.client import connect
 
-            chunks = queue.Queue(maxsize=20)
+            chunks = queue.Queue(maxsize=200)  # 10 s, so speech during the connect isn't lost
             overflow = threading.Event()
+            listen_from = time.monotonic() + self.skip_s
 
-            def audio_callback(data, frames, timing, status):
-                if status:
-                    overflow.set()
+            def on_audio(chunk):
+                if time.monotonic() < listen_from:
+                    return
                 try:
-                    chunks.put_nowait(bytes(data))
+                    chunks.put_nowait(chunk)
                 except queue.Full:
                     overflow.set()
 
             url = ("wss://api.elevenlabs.io/v1/speech-to-text/realtime"
                    "?model_id=scribe_v2_realtime&audio_format=pcm_16000"
                    "&commit_strategy=vad&language_code=en")
-            self.status("connecting to ElevenLabs; microphone audio will be streamed")
-            with connect(url, additional_headers={"xi-api-key": key}, open_timeout=10,
-                         close_timeout=1) as ws:
-                self._socket = ws
-                if self._stop.is_set():
-                    return
-                with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16",
-                                       blocksize=1600, callback=audio_callback):
+            # record before connecting; buffered audio is sent once the socket is open
+            with self._audio(on_audio):
+                self.status("connecting to ElevenLabs; microphone audio will be streamed")
+                with connect(url, additional_headers={"xi-api-key": key}, open_timeout=10,
+                             close_timeout=1) as ws:
+                    self._socket = ws
                     while not self._stop.is_set():
                         if overflow.is_set():
                             raise RuntimeError("microphone stream fell behind; restart voice control")
                         try:
-                            chunk = chunks.get(timeout=0.05)
+                            chunk = chunks.get(timeout=0.02)
                         except queue.Empty:
                             chunk = None
                         if chunk is not None:

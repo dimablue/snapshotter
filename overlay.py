@@ -30,6 +30,7 @@ class Overlay(QWidget):
         self.setGeometry(screen_geometry)
 
         self.crop = None
+        self.idle = False        # wake mode between selections: draw only toasts and the flash
         self.show_gaze = show_gaze
         self.box = None          # (left, top, w, h) global
         self.gaze = None         # (x, y) global
@@ -98,12 +99,12 @@ class Overlay(QWidget):
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = time.monotonic()
 
-        for img, rect, pad in self.markers:
+        for img, rect, pad in ([] if self.idle else self.markers):
             r = self._local_rect((rect.x(), rect.y(), rect.width(), rect.height()))
             qp.fillRect(r.adjusted(-pad, -pad, pad, pad), Qt.GlobalColor.white)
             qp.drawImage(r, img)  # nearest-neighbour by default: crisp tag edges
 
-        if self.box and not self.paused and self.crop is None:
+        if self.box and not self.paused and self.crop is None and not self.idle:
             r = self._local_rect(self.box)
             if self.stable:
                 pen = QPen(ACCENT, 3)
@@ -114,7 +115,7 @@ class Overlay(QWidget):
             qp.setPen(pen)
             qp.drawRoundedRect(r, 12, 12)
 
-        if self.crop is not None and not self.paused:
+        if self.crop is not None and not self.paused and not self.idle:
             crop = self.crop
             qp.setBrush(Qt.BrushStyle.NoBrush)
             qp.setPen(QPen(ACCENT, 3))
@@ -138,7 +139,7 @@ class Overlay(QWidget):
             qp.drawText(QRectF(20, 50, self.width()-40, 40), Qt.AlignmentFlag.AlignCenter,
                         instructions[crop.state])
 
-        if self.show_gaze and self.gaze and not self.paused:
+        if self.show_gaze and self.gaze and not self.paused and not self.idle:
             p = self.mapFromGlobal(QPoint(int(self.gaze[0]), int(self.gaze[1])))
             qp.setPen(Qt.PenStyle.NoPen)
             qp.setBrush(QColor(255, 80, 80, 200))
@@ -150,7 +151,8 @@ class Overlay(QWidget):
             qp.setBrush(QColor(255, 255, 255, alpha))
             qp.drawRoundedRect(self._local_rect(self.flash_rect), 12, 12)
 
-        text = "Paused" if self.paused else (self.status if now < self.status_until else self.voice_status)
+        recent = self.status if now < self.status_until else ""
+        text = "Paused" if self.paused else (recent if self.idle else recent or self.voice_status)
         if text:
             qp.setFont(QFont("Helvetica Neue", 15))
             fm = qp.fontMetrics()
