@@ -60,9 +60,9 @@ The app lives in the menu bar (eye icon), with no Dock icon.
 
 ## Pupil Labs Neon
 
-The Neon is usually used with its Companion app on an Android phone. We have no Android phone, so
-the glasses plug straight into the Mac over USB and **Pupil Capture** (Pupil Labs' open-source
-desktop software) does the eye tracking. Getting that working on Apple Silicon took most of the
+The Neon is usually used with its Companion app on an Android phone. We wanted everything to run
+on the laptop alone, so the glasses plug straight into the Mac over USB and **Pupil Capture**
+(Pupil Labs' open-source desktop software) does the eye tracking. Getting that working on Apple Silicon took most of the
 effort:
 
 - **Scene camera.** Pupil Capture reads the scene camera over raw USB (libuvc). Under Rosetta that
@@ -135,8 +135,8 @@ data, never as instructions.
   not at 25%, and a gaze check with faint markers came out worse. So the markers stay solid, but they
   only appear while a selection is open, and they're hidden for the instant the screenshot is
   taken, so they never end up in your images.
-- **Pupil Capture over USB instead of the Companion app**, because the Companion app is
-  Android-only.
+- **Pupil Capture over USB instead of the Companion app**, so everything runs on the laptop, with
+  no phone in the loop.
 - **2D calibration, 3D detector off**, because the screen is at a fixed distance and the CPU
   (Rosetta) can't keep up with both.
 - **Keep the best calibration.** `tools/neon_setup.py save NAME` and `restore NAME` store and reload
