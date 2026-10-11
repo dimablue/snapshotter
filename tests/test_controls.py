@@ -167,6 +167,13 @@ def test_wake_mode_session(monkeypatch):
         app.events.put(('gaze', 300, 200, time.monotonic() + 0.01))
         app.tick()  # the first corner is pinned on the next fresh gaze sample
         assert app.crop.state == 'second' and app.crop_by_voice
+        app.events.put(('gaze', 600, 450, time.monotonic() + 0.02))
+        app.events.put(('cmd', 'capture'))  # offline recognizer, fast
+        app.events.put(('cmd', 'capture'))  # the same word again from ElevenLabs
+        app.tick()
+        assert len(snaps) == 1
+        snaps.clear()
+        app.crop.state = 'second'
         app.command('cancel')
         QTest.qWait(50)
         assert app.overlay.idle and not app.crop_active and sessions[0].stopped

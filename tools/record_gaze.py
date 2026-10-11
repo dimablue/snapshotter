@@ -157,6 +157,8 @@ class Session:
         self.overlay = Overlay(self.geom, show_gaze=False)
         self.overlay.show()
         self.verts = self.overlay.place_markers(args.marker_size, self.avail)
+        self.overlay.marker_opacity = args.marker_opacity
+        self.overlay.marker_pad = None if args.marker_border < 0 else args.marker_border
         _, pad = marker_layout(self.avail.intersected(self.geom), args.marker_size)
         self.marker_rects = [(v[0][0] - pad, v[0][1] - pad, v[2][0] + pad, v[2][1] + pad)
                              for v in self.verts.values()]
@@ -329,6 +331,8 @@ class Session:
             "physical_size_mm": [self.app.primaryScreen().physicalSize().width(),
                                  self.app.primaryScreen().physicalSize().height()],
             "marker_size": self.args.marker_size,
+            "marker_opacity": self.args.marker_opacity,
+            "marker_border": self.args.marker_border,
             "marker_verts": {str(k): v for k, v in self.verts.items()},
             "span": self.span,
             "surface": self.args.surface,
@@ -349,6 +353,8 @@ def main():
     p.add_argument("--port", type=int, default=50020, help="Pupil Remote port")
     p.add_argument("--surface", default="screen")
     p.add_argument("--marker-size", type=int, default=DEFAULT_MARKER_SIZE)
+    p.add_argument("--marker-opacity", type=float, default=1.0, help="same as gazesnap.py")
+    p.add_argument("--marker-border", type=int, default=-1, help="same as gazesnap.py")
     p.add_argument("--out", default=str(ROOT / "recordings"))
     p.add_argument("--ready", type=float, default=5.0, help="countdown before starting (s)")
     p.add_argument("--no-calibrate", action="store_true", help="skip the Pupil calibration at the start")

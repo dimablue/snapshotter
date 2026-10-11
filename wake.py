@@ -1,8 +1,12 @@
-"""Offline, free wake phrase: "hey Neon, take a screenshot".
+"""Offline, free wake phrase: "hey Neon, take a screenshot", and the selection commands.
 
 Vosk recognizes speech locally, restricted to a few phrases, so it is fast (the phrase
 usually fires before you finish saying it) and nothing leaves the computer. GazeSnap only
 connects to ElevenLabs after this fires.
+
+While a selection is open ("selecting"), "capture", "retry" and "cancel" are recognized here
+too: locally they fire ~0.35 s into the word, well before ElevenLabs answers, and they work
+before ElevenLabs has even connected. The app drops the slower duplicate from ElevenLabs.
 """
 import json
 import queue
@@ -22,7 +26,12 @@ MODEL_DIR = Path.home() / ".cache" / "gazesnap"
 # Restricting Vosk to these phrases is what makes it accurate; anything else becomes [unk].
 GRAMMAR = ["hey neon take a screenshot", "hey neon take screenshot", "hey neon screenshot",
            "okay neon take a screenshot", "ok neon take a screenshot", "neon take a screenshot",
-           "hey neon", "[unk]"]
+           "hey neon",
+           # selection commands (only acted on while a selection is open)
+           "capture", "capture this", "capture it", "snap", "snap it", "screenshot", "take a screenshot",
+           "retry", "redo", "try again", "cancel",
+           "[unk]"]
+SELECTION_COMMANDS = {"capture", "r", "cancel"}
 
 
 def model_path(status):
@@ -40,11 +49,20 @@ def model_path(status):
     return path
 
 
+def new_commands(cmds, fired):
+    """Commands in `cmds` not already sent from an earlier partial result of the same utterance."""
+    k = 0
+    while k < min(len(cmds), len(fired)) and cmds[k] == fired[k]:
+        k += 1
+    return cmds[k:]
+
+
 class WakeListener:
     def __init__(self, events, mic):
         self.events = events
         self.mic = mic
         self.paused = False  # set from the menu bar; audio is still read but ignored
+        self.selecting = False  # set by the app while a selection is open
         self._output_muted = False
         self._resume_at = 0.0
         self._audio_epoch = 0
@@ -93,7 +111,7 @@ class WakeListener:
 
         self.mic.subscribe(on_audio)
         self.status("listening offline for “hey Neon, take a screenshot”")
-        fired = False
+        fired = []  # commands already sent for the utterance being recognized
         epoch = self._audio_epoch
         try:
             while not self._stop.is_set():
@@ -103,7 +121,7 @@ class WakeListener:
                     continue
                 if epoch != self._audio_epoch:
                     recognizer.Reset()
-                    fired = False
+                    fired = []
                     epoch = self._audio_epoch
                 if chunk_epoch != epoch or self.paused or self._output_muted or time.monotonic() < self._resume_at:
                     continue
@@ -111,12 +129,13 @@ class WakeListener:
                 result = json.loads(recognizer.Result() if done else recognizer.PartialResult())
                 text = (result.get("text") if done else result.get("partial")) or ""
                 # fire on the partial result, as soon as the phrase is complete
-                if not fired and not self.paused and \
-                        "start" in commands_in(text.replace("[unk]", " "), final=done):
-                    fired = True
-                    self.events.put(("cmd", "start"))
+                cmds = [c for c in commands_in(text.replace("[unk]", " "), final=done)
+                        if c == "start" or (self.selecting and c in SELECTION_COMMANDS)]
+                if not self.paused:
+                    for cmd in new_commands(cmds, fired):
+                        self.events.put(("cmd", cmd))
+                fired = [] if done else max(cmds, fired, key=len)
                 if done:
-                    fired = False
                     if text.replace("[unk]", "").strip():  # for the log only; not shown on screen
                         self.events.put(("status", f"wake-heard: “{text}”"))
         finally:

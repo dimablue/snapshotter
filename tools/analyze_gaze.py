@@ -185,6 +185,25 @@ def report(meta, events, messages, distance_cm=50.0, out=print):
         out(f"{phase:8} {len(have):2}/{len(rows):<2} {fmt(e.mean())} / {fmt(e.max())}   "
             f"{bias[0]:+5.0f}, {bias[1]:+5.0f}   {noise:4.0f} pt   {corr}")
 
+    windows = dot_windows(meta, events)
+    if any(r[0] == "still" for r in dots):
+        out("\n== each 'still' dot, left to right, top to bottom ==")
+        out("   dot (x, y)      error    dx    dy   samples  eye0 conf  eye1 conf")
+        rows = sorted(((r, w) for r, w in zip(dots, windows) if r[0] == "still"),
+                      key=lambda rw: (round(rw[0][1][1]), rw[0][1][0]))
+        for (phase, target, med, n, _), (_, _, _, t0, t1) in rows:
+            confs = []
+            for eye in (0, 1):
+                a = pupils.get(eye)
+                c = a[(a[:, 0] >= t0) & (a[:, 0] < t1), 1] if a is not None else []
+                confs.append(f"{np.median(c):9.2f}" if len(c) else "        -")
+            if med is None:
+                out(f"({target[0]:5.0f}, {target[1]:4.0f})   no gaze      {n:5}  " + "  ".join(confs))
+            else:
+                dx, dy = med[0] - target[0], med[1] - target[1]
+                out(f"({target[0]:5.0f}, {target[1]:4.0f})  {math.hypot(dx, dy):5.0f}  {dx:+5.0f} {dy:+5.0f}  "
+                    f"{n:5}   " + "  ".join(confs))
+
     still = [r for r in dots if r[0] == "still" and r[2] is not None]
     if len(still) >= 6:
         m = np.array([r[2] for r in still])

@@ -63,6 +63,8 @@ class Overlay(QWidget):
         self.status = ""
         self.status_until = 0.0
         self.markers = []        # [(QImage, QRect global, pad)]
+        self.marker_opacity = 1.0
+        self.marker_pad = None   # drawn white border (px); None = the full quiet zone from marker_layout
 
     # --- markers ------------------------------------------------------------
     def place_markers(self, size, available):
@@ -111,10 +113,13 @@ class Overlay(QWidget):
         qp.setRenderHint(QPainter.RenderHint.Antialiasing)
         now = time.monotonic()
 
+        qp.setOpacity(self.marker_opacity)
         for img, rect, pad in ([] if self.idle else self.markers):
             r = self._local_rect((rect.x(), rect.y(), rect.width(), rect.height()))
+            pad = pad if self.marker_pad is None else self.marker_pad
             qp.fillRect(r.adjusted(-pad, -pad, pad, pad), Qt.GlobalColor.white)
             qp.drawImage(r, img)  # nearest-neighbour by default: crisp tag edges
+        qp.setOpacity(1.0)
 
         if self.box and not self.paused and self.crop is None and not self.idle:
             r = self._local_rect(self.box)

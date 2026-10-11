@@ -6,6 +6,8 @@
     python tools/neon_setup.py calibrate # start the screen-marker calibration
     python tools/neon_setup.py surface   # write the exact "screen" surface (asks for your password)
     python tools/neon_setup.py eyes      # restart stalled eye cameras ("no pupil data") without a replug
+    python tools/neon_setup.py save NAME     # keep the current calibration + gaze correction
+    python tools/neon_setup.py restore NAME  # bring a saved one back (no bullseyes, no dot check)
 
 `install` copies the macOS scene-camera plugin into Pupil Capture's plugin folder (root-owned,
 because Pupil Capture runs with sudo). Configuring then, over Pupil Remote:
@@ -193,9 +195,44 @@ def configure(remote, camera, seconds):
     print("Next: python tools/neon_setup.py calibrate" if ok else "Fix the eyes first, then calibrate.")
 
 
+CALIBRATIONS = Path("~/.cache/gazesnap/calibrations").expanduser()
+CORRECTION = Path("~/.cache/gazesnap/gaze_correction.json").expanduser()
+CALIBRATION_FILES = ("prerecorded_calibration_result", "prerecorded_calibration_setup", "surface_definitions_v01")
+
+
+def save_calibration(pupil_dir, name):
+    """Copy Pupil's last calibration, the screen surface and GazeSnap's gaze correction."""
+    target = CALIBRATIONS / name
+    target.mkdir(parents=True, exist_ok=True)
+    settings = Path(pupil_dir).expanduser() / "capture_settings"
+    for f in CALIBRATION_FILES:
+        if (settings / f).exists():
+            shutil.copy2(settings / f, target / f)
+    if CORRECTION.exists():
+        shutil.copy2(CORRECTION, target / CORRECTION.name)
+    print(f"saved to {target}")
+
+
+def restore_calibration(remote, name):
+    """Restart Pupil's gaze mapper with the saved parameters and put the gaze correction back.
+    Only right if the headset sits as it did then: check with gazesnap.py --check."""
+    source = CALIBRATIONS / name
+    if not source.is_dir():
+        saved = sorted(p.name for p in CALIBRATIONS.glob("*") if p.is_dir())
+        sys.exit(f"no saved calibration {name!r}. Saved: {', '.join(saved) or 'none'}")
+    result = msgpack.unpackb((source / "prerecorded_calibration_result").read_bytes(), raw=False)
+    remote.notify("start_plugin", name=result["gazer_class_name"], args={"params": result["params"]})
+    print(f"Pupil Capture: {result['gazer_class_name']} calibration from {name} restored")
+    if (source / CORRECTION.name).exists():
+        shutil.copy2(source / CORRECTION.name, CORRECTION)
+        print("gaze correction restored (restart GazeSnap to use it)")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("action", nargs="?", choices=["install", "configure", "calibrate", "surface", "eyes"], default="configure")
+    p.add_argument("action", nargs="?", choices=["install", "configure", "calibrate", "surface", "eyes", "save", "restore"],
+                   default="configure")
+    p.add_argument("name", nargs="?", help="for save/restore: the calibration's name")
     p.add_argument("--pupil-dir", default="~/Downloads/pupil")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=50020)
@@ -211,7 +248,16 @@ def main():
             from overlay import DEFAULT_MARKER_SIZE
             a.marker_size = DEFAULT_MARKER_SIZE
         return write_surface(a.pupil_dir, a.host, a.port, a.marker_size)
+    if a.action == "save":
+        return save_calibration(a.pupil_dir, a.name or time.strftime("%Y-%m-%d_%H-%M"))
     remote = Remote(a.host, a.port)
+    if a.action == "restore":
+        if not a.name:
+            sys.exit("which one? python tools/neon_setup.py restore NAME")
+        try:
+            return restore_calibration(remote, a.name)
+        except zmq.Again:
+            sys.exit("Pupil Capture is not answering. Start it first.")
     if a.action == "eyes":
         sys.path.insert(0, str(ROOT))
         from sources.pupil_capture import restart_eye_cameras

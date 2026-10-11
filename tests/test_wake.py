@@ -40,9 +40,10 @@ def speech(tmp_path, text):
         return w.readframes(w.getnframes()) + b"\0" * 32000  # plus 1 s of silence
 
 
-def listen(tmp_path, text):
+def listen(tmp_path, text, selecting=False):
     events, mic = queue.Queue(), FakeMic()
     listener = wake.WakeListener(events, mic)
+    listener.selecting = selecting
     listener.start()
     for _ in range(100):  # wait for the model to load and subscribe
         if mic.subscribers:
@@ -62,3 +63,18 @@ def test_wake_phrase_fires_once(tmp_path):
                                   "take a screenshot", "hey neon"])
 def test_other_speech_does_not_wake(tmp_path, text):
     assert listen(tmp_path, text) == []
+
+
+@pytest.mark.parametrize("text,cmd", [("capture", "capture"), ("snap", "capture"), ("retry", "r"),
+                                      ("cancel", "cancel")])
+def test_selection_commands_heard_offline_while_selecting(tmp_path, text, cmd):
+    assert listen(tmp_path, text, selecting=True) == [("cmd", cmd)]
+
+
+def test_selection_commands_ignored_when_no_selection(tmp_path):
+    assert listen(tmp_path, "capture") == []
+
+
+def test_new_commands_skips_ones_already_sent():
+    assert wake.new_commands(["start"], ["start"]) == []
+    assert wake.new_commands(["start", "capture"], ["start"]) == ["capture"]

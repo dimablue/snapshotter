@@ -16,6 +16,7 @@ import json
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +49,8 @@ def parse_args():
     p.add_argument("--model", default="claude-opus-5-5", help="Claude model for narration")
     p.add_argument("--voice", default=None, help="macOS `say` voice, e.g. Samantha")
     p.add_argument("--out", default=os.path.expanduser("~/Pictures/GazeSnap"))
+    p.add_argument("--open", action=argparse.BooleanOptionalAction, default=True,
+                   help="open each screenshot in Preview after taking it")
     p.add_argument("--box", nargs=2, type=int, default=[480, 300], metavar=("W", "H"))
     p.add_argument("--no-gaze-dot", action="store_true", help="hide the red gaze dot")
     p.add_argument("--no-sound", action="store_true")
@@ -76,6 +79,10 @@ def parse_args():
     p.add_argument("--flip-y", action="store_true", help="use if the box moves opposite to your gaze vertically")
     p.add_argument("--marker-size", type=int, default=DEFAULT_MARKER_SIZE,
                    help="screen size of the Neon markers (keep in sync with tools/neon_setup.py surface)")
+    p.add_argument("--marker-opacity", type=float, default=1.0,
+                   help="corner marker opacity; Pupil stops finding them below about 0.3")
+    p.add_argument("--marker-border", type=int, default=-1,
+                   help="white border drawn around each marker (px); -1 = the full quiet zone")
     p.add_argument("--check", action="store_true",
                    help="start with the guided gaze check: look at 9 dots; fits and saves a correction")
     p.add_argument("--no-correction", action="store_true", help="ignore the saved gaze correction")
@@ -110,6 +117,8 @@ class GazeSnapApp:
         self.source = get_source_class(args.source)(self.screen_w, self.screen_h, self.events, args)
         if self.source.needs_markers:
             self.source.marker_verts = self.overlay.place_markers(args.marker_size, screen.availableGeometry())
+            self.overlay.marker_opacity = args.marker_opacity
+            self.overlay.marker_pad = None if args.marker_border < 0 else args.marker_border
 
         self.filter = GazeFilter(args.min_cutoff, args.beta)
         self.tracker = BoxTracker(self.screen_w, self.screen_h, *args.box)
@@ -144,6 +153,7 @@ class GazeSnapApp:
         self.crop_by_voice = False  # selection started by "hey Neon"; ends after capture
         self.last_gaze = None
         self.gaze_xy = None  # latest filtered gaze/cursor
+        self.last_selection_cmd = None  # (cmd, monotonic) for duplicate_voice_command
         self.gaze_hist = collections.deque(maxlen=400)  # (t, x, y): recent gaze, for fixations
         self.check = None  # ScreenCheck while the guided gaze check runs
         self.correction = None if args.no_correction else self.load_correction()
@@ -204,6 +214,8 @@ class GazeSnapApp:
             return
         self.cancel_analysis()
         self.overlay.idle = False
+        if self.wake:
+            self.wake.selecting = True  # "capture"/"retry"/"cancel" from the fast offline recognizer
         self.pending_start = time.monotonic()
         self.selection_deadline = time.monotonic() + self.args.selection_timeout
         if self.voice_control is None or not self.voice_control.alive:
@@ -218,6 +230,8 @@ class GazeSnapApp:
         listener keeps running)."""
         self.overlay.idle = True
         self.overlay.update()  # clear the selection from the screen
+        if self.wake:
+            self.wake.selecting = False
         self.pending_start = self.selection_deadline = None
         if self.voice_control is not None:
             # stop() waits for the thread; don't block the UI on it
@@ -465,6 +479,8 @@ class GazeSnapApp:
             elif kind == "reply":
                 self.handle_reply(ev[1], ev[2])
             elif kind == "cmd":
+                if self.duplicate_voice_command(ev[1]):
+                    continue
                 if self.awaiting_reply and ev[1] not in ('q', 'p', 's', 'a', 'v', 'start'):
                     self.handle_reply(self.reply_token, ev[1])
                     continue
@@ -568,6 +584,16 @@ class GazeSnapApp:
                 self.log(f"gaze correction saved and applied ({self.CORRECTION_PATH})")
         if self.args.wake:
             self.go_idle()
+
+    def duplicate_voice_command(self, cmd, window=1.5):
+        """Selection commands arrive twice, from the offline recognizer and then from
+        ElevenLabs: act on the first only."""
+        if cmd not in ("capture", "r", "cancel"):
+            return False
+        now = time.monotonic()
+        last = self.last_selection_cmd
+        self.last_selection_cmd = (cmd, now)
+        return last is not None and last[0] == cmd and now - last[1] < window
 
     def recent_fixation(self, seconds):
         now = time.monotonic()
@@ -685,6 +711,8 @@ class GazeSnapApp:
         self.overlay.flash(rect)
         self.app.clipboard().setImage(QImage(path))
         self.log(f"saved {path}")
+        if self.args.open:
+            subprocess.Popen(["open", path])
         if self.analysis_enabled and self.analyzer:
             self.action_flow.reset(path)
             self.analysis_id = self.analyzer.analyze_async(path)
