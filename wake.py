@@ -6,7 +6,9 @@ connects to ElevenLabs after this fires.
 """
 import json
 import queue
+import shutil
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -28,7 +30,9 @@ def model_path(status):
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         status("downloading the offline speech model (40 MB, once)…")
         archive = MODEL_DIR / f"{MODEL_NAME}.zip"
-        urllib.request.urlretrieve(MODEL_URL, archive)
+        from image_analyzer import tls_context
+        with urllib.request.urlopen(MODEL_URL, context=tls_context(), timeout=60) as response, archive.open('wb') as out:
+            shutil.copyfileobj(response, out)
         with zipfile.ZipFile(archive) as z:
             z.extractall(MODEL_DIR)
         archive.unlink()
@@ -40,11 +44,20 @@ class WakeListener:
         self.events = events
         self.mic = mic
         self.paused = False  # set from the menu bar; audio is still read but ignored
+        self._output_muted = False
+        self._resume_at = 0.0
+        self._audio_epoch = 0
         self._stop = threading.Event()
         self._thread = None
 
     def status(self, text):
         self.events.put(("status", "wake: " + text))
+
+    def set_output_muted(self, muted):
+        """Drop speaker audio without changing the user's Pause listening preference."""
+        self._audio_epoch += 1
+        self._output_muted = muted
+        self._resume_at = float('inf') if muted else time.monotonic() + 0.5
 
     def start(self):
         self._thread = threading.Thread(target=self.run, name="wake", daemon=True)
@@ -70,19 +83,28 @@ class WakeListener:
         chunks = queue.Queue(maxsize=100)
 
         def on_audio(chunk):
+            if self.paused or self._output_muted or time.monotonic() < self._resume_at:
+                return
             try:
-                chunks.put_nowait(chunk)
+                chunks.put_nowait((self._audio_epoch, chunk))
             except queue.Full:
                 pass  # fell behind; dropping audio only delays the wake phrase
 
         self.mic.subscribe(on_audio)
         self.status("listening offline for “hey Neon, take a screenshot”")
         fired = False
+        epoch = self._audio_epoch
         try:
             while not self._stop.is_set():
                 try:
-                    chunk = chunks.get(timeout=0.1)
+                    chunk_epoch, chunk = chunks.get(timeout=0.1)
                 except queue.Empty:
+                    continue
+                if epoch != self._audio_epoch:
+                    recognizer.Reset()
+                    fired = False
+                    epoch = self._audio_epoch
+                if chunk_epoch != epoch or self.paused or self._output_muted or time.monotonic() < self._resume_at:
                     continue
                 done = recognizer.AcceptWaveform(chunk)
                 result = json.loads(recognizer.Result() if done else recognizer.PartialResult())

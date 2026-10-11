@@ -121,6 +121,15 @@ class VoiceControl:
         self._thread = None
         self._socket = None
         self.fired = []  # commands already sent for the sentence being spoken
+        self._output_muted = False
+        self._resume_at = 0.0
+        self._audio_epoch = 0
+
+    def set_output_muted(self, muted):
+        self._audio_epoch += 1
+        self._output_muted = muted
+        self._resume_at = float('inf') if muted else time.monotonic() + 0.5
+        self.fired = []
 
     def status(self, text):
         self.events.put(("status", "voice: " + text))
@@ -130,6 +139,9 @@ class VoiceControl:
         if kind == "session_started":
             self.status(self.ready)
         elif kind in ("partial_transcript", "committed_transcript"):
+            if self._output_muted or time.monotonic() < self._resume_at:
+                self.fired = []
+                return
             final = kind == "committed_transcript"
             text = message.get("text", "").strip()
             cmds = commands_in(text, final)
@@ -192,16 +204,17 @@ class VoiceControl:
                 self.status("off — set ELEVENLABS_API_KEY (or save it in the Keychain) and restart")
                 return
             from websockets.sync.client import connect
+            from image_analyzer import tls_context
 
             chunks = queue.Queue(maxsize=200)  # 10 s, so speech during the connect isn't lost
             overflow = threading.Event()
             listen_from = time.monotonic() + self.skip_s
 
             def on_audio(chunk):
-                if time.monotonic() < listen_from:
+                if self._output_muted or time.monotonic() < max(listen_from, self._resume_at):
                     return
                 try:
-                    chunks.put_nowait(chunk)
+                    chunks.put_nowait((self._audio_epoch, chunk))
                 except queue.Full:
                     overflow.set()
 
@@ -211,14 +224,16 @@ class VoiceControl:
             # record before connecting; buffered audio is sent once the socket is open
             with self._audio(on_audio):
                 self.status("connecting to ElevenLabs; microphone audio will be streamed")
-                with connect(url, additional_headers={"xi-api-key": key}, open_timeout=10,
+                with connect(url, ssl=tls_context(), additional_headers={"xi-api-key": key}, open_timeout=10,
                              close_timeout=1) as ws:
                     self._socket = ws
                     while not self._stop.is_set():
                         if overflow.is_set():
                             raise RuntimeError("microphone stream fell behind; restart voice control")
                         try:
-                            chunk = chunks.get(timeout=0.02)
+                            epoch, chunk = chunks.get(timeout=0.02)
+                            if epoch != self._audio_epoch or self._output_muted:
+                                chunk = None
                         except queue.Empty:
                             chunk = None
                         if chunk is not None:
