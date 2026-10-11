@@ -121,9 +121,14 @@ class VoiceControl:
         self._thread = None
         self._socket = None
         self.fired = []  # commands already sent for the sentence being spoken
+        self.reply_token = None
         self._output_muted = False
         self._resume_at = 0.0
         self._audio_epoch = 0
+
+    def set_reply_mode(self, token):
+        self.reply_token = token
+        self.fired = []
 
     def set_output_muted(self, muted):
         self._audio_epoch += 1
@@ -135,6 +140,8 @@ class VoiceControl:
         self.events.put(("status", "voice: " + text))
 
     def handle_message(self, message):
+        if self._stop.is_set():
+            return
         kind = message.get("message_type", "")
         if kind == "session_started":
             self.status(self.ready)
@@ -144,6 +151,11 @@ class VoiceControl:
                 return
             final = kind == "committed_transcript"
             text = message.get("text", "").strip()
+            if self.reply_token is not None:
+                # Free speech is committed once, never acted on from partial transcripts.
+                if final and text:
+                    self.events.put(('reply', self.reply_token, text))
+                return
             cmds = commands_in(text, final)
             # send only commands not already sent from an earlier partial of this sentence
             k = 0

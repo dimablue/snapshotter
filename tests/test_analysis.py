@@ -62,6 +62,9 @@ def test_uploads_image_then_streams_and_closes_despite_pings(tmp_path, monkeypat
     frames = [
         {'type': 'conversation_initiation_metadata', 'conversation_initiation_metadata_event': {
             'conversation_id': 'conv-test', 'agent_output_audio_format': 'pcm_16000'}},
+        {'type': 'client_tool_call', 'client_tool_call': {
+            'tool_name': 'publish_snapshot_result', 'tool_call_id': 'tool-1',
+            'parameters': {'stage': 'offer', 'action': 'questions', 'summary': 'Revenue rose overall.'}}},
         {'type': 'audio', 'audio_event': {'audio_base_64': base64.b64encode(b'\x01\x00' * 80).decode()}},
         {'type': 'agent_response', 'agent_response_event': {'agent_response': 'Revenue rose overall.'}},
         {'type': 'agent_response_complete'},
@@ -98,6 +101,11 @@ def test_uploads_image_then_streams_and_closes_despite_pings(tmp_path, monkeypat
         result = wait_finished(events)
         assert not any(ev[0] == 'analysis_failed' for ev in result)
         assert ('analysis_text', 1, 'Revenue rose overall.') in result
+        structured = next(ev[2] for ev in result if ev[0] == 'analysis_result')
+        assert structured['action'] == 'questions'
+        reply = next(s for s in sent if s['type'] == 'client_tool_result')
+        assert reply['tool_call_id'] == 'tool-1' and not reply['is_error']
+        assert json.loads(reply['result'])['saved'] is False
         multimodal = next(s for s in sent if s['type'] == 'multimodal_message')
         assert multimodal['file']['file_id'] == 'file-test'
         assert player.pcm == b'\x01\x00' * 80 and player.closed
