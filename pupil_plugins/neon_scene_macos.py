@@ -27,7 +27,8 @@ def find_camera_index(name_part):
     import AVFoundation as AVF
 
     devices = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)
-    for i, device in enumerate(devices):
+    # OpenCV numbers cameras in uniqueID order, not in the order macOS lists them
+    for i, device in enumerate(sorted(devices, key=lambda d: str(d.uniqueID()))):
         if name_part.lower() in str(device.localizedName()).lower():
             return i, str(device.localizedName())
     return None, None
@@ -43,7 +44,7 @@ class Neon_Scene_MacOS_Source(Base_Source):
         self.latency = latency  # seconds between exposure and the frame reaching us
         self._intrinsics = Camera_Model.from_file(g_pool.user_dir, INTRINSICS_NAME, self._frame_size)
         self._latest = None
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._stop = threading.Event()
         self._online = False
         self._index = 0
@@ -53,27 +54,37 @@ class Neon_Scene_MacOS_Source(Base_Source):
 
     # --- capture thread ---------------------------------------------------------------
     def _capture(self):
+        # Reopen whenever the camera goes away (e.g. the Neon is replugged).
+        while not self._stop.is_set():
+            if self._stream_once() == "fatal":
+                return
+
+    def _find_camera(self):
+        """Wait until macOS lists the camera; returns (index, name) or (None, None) if stopping."""
+        warned, started = False, time.monotonic()
+        while not self._stop.is_set():
+            index, full_name = find_camera_index(self.camera_name)
+            if index is not None:
+                return index, full_name
+            self.status = f"waiting for a macOS camera named like {self.camera_name!r}…"
+            if not warned and time.monotonic() - started > 10:
+                warned = True
+                logger.error(f"no macOS camera named like {self.camera_name!r}; unplug and replug "
+                             "the Neon (still waiting)")
+            time.sleep(1)
+        return None, None
+
+    def _stream_once(self):
         import cv2
 
-        # When this replaces Pupil's raw-USB source, macOS may need a moment to see the camera.
-        index = full_name = None
-        deadline = time.monotonic() + 20
-        while index is None and not self._stop.is_set():
-            try:
-                index, full_name = find_camera_index(self.camera_name)
-            except ImportError:
-                self.status = "needs pyobjc-framework-AVFoundation in Pupil's environment"
-                logger.error(self.status)
-                return
-            if index is None:
-                if time.monotonic() > deadline:
-                    self.status = f"no macOS camera named like {self.camera_name!r}"
-                    logger.error(self.status + " (is the Neon plugged in?)")
-                    return
-                self.status = "waiting for macOS to list the scene camera…"
-                time.sleep(1)
+        try:
+            index, full_name = self._find_camera()
+        except ImportError:
+            self.status = "needs pyobjc-framework-AVFoundation in Pupil's environment"
+            logger.error(self.status)
+            return "fatal"
         if index is None:
-            return
+            return "stopped"
         cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._frame_size[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._frame_size[1])
@@ -81,26 +92,40 @@ class Neon_Scene_MacOS_Source(Base_Source):
         if not cap.isOpened():
             self.status = f"could not open {full_name} (Camera permission for Terminal?)"
             logger.error(self.status)
-            return
+            cap.release()
+            time.sleep(2)
+            return "retry"
         self.status = f"streaming {full_name}"
         logger.info(f"Neon scene camera via macOS: {full_name} (index {index})")
         self._online = True
+        last_frame = time.monotonic()
         try:
             while not self._stop.is_set():
                 ok, img = cap.read()
                 ts = self.g_pool.get_timestamp() - self.latency
                 if not ok:
+                    if time.monotonic() - last_frame > 2:
+                        logger.warning("Neon scene camera stopped sending frames; reopening it")
+                        return "retry"
                     time.sleep(0.01)
                     continue
+                last_frame = time.monotonic()
                 with self._lock:
                     self._latest = (img, ts)
+                    self._lock.notify()
         finally:
             self._online = False
             cap.release()
+        return "stopped"
 
     # --- Base_Source --------------------------------------------------------------
     def recent_events(self, events):
+        # Wait for the next frame, like Pupil's own camera source: plugins such as the Surface
+        # Tracker only map the gaze collected in loop iterations that carry a frame, and a
+        # spinning loop would also starve the eye processes of CPU.
         with self._lock:
+            if self._latest is None and self._online:
+                self._lock.wait(timeout=2 / self._frame_rate)
             item, self._latest = self._latest, None
         if item is None:
             return
@@ -149,3 +174,41 @@ class Neon_Scene_MacOS_Source(Base_Source):
         self._stop.set()
         self._thread.join(timeout=2)
         super().cleanup()
+
+
+def _scene_via_macos_auto_activate(self, scene=True, eyes=True):
+    """Neon activation without Pupil's raw-USB scene source: once that has opened the scene
+    camera, macOS loses it until the Neon is replugged. Eyes still use Pupil's Neon backend."""
+    logger.debug("Auto activating Neon source (scene camera via macOS).")
+    if scene:
+        self.notify_all({"subject": "start_plugin", "name": "Neon_Scene_MacOS_Source", "args": {}})
+    if eyes:
+        for eye in range(2):
+            self.notify_all({"subject": "start_eye_plugin", "target": f"eye{eye}",
+                             "name": "Neon_Eye_Cam_Source"})
+
+
+def _patch(uvc_init):
+    def init(self, g_pool, frame_size, frame_rate, name=None, *args, **kwargs):
+        """Pupil restores last session's video source at startup; if that was the raw-USB Neon
+        scene camera, open nothing and switch to the macOS source instead."""
+        if getattr(g_pool, "process", "") == "world" and "Neon Scene Camera" in str(name or ""):
+            kwargs.update(uid=None, preferred_names=())
+            uvc_init(self, g_pool, frame_size, frame_rate, None, *args, **kwargs)
+            logger.info("Neon scene camera: using the macOS camera instead of raw USB")
+            self.notify_all({"subject": "start_plugin", "name": "Neon_Scene_MacOS_Source", "args": {}})
+            return
+        uvc_init(self, g_pool, frame_size, frame_rate, name, *args, **kwargs)
+    return init
+
+
+# Pupil imports runtime plugins before it restores or activates video sources, so these take
+# effect in time.
+try:
+    from video_capture.neon_backend.plugin import Neon_Manager
+    from video_capture.uvc_backend import UVC_Source
+
+    Neon_Manager.auto_activate_source = _scene_via_macos_auto_activate
+    UVC_Source.__init__ = _patch(UVC_Source.__init__)
+except ImportError:
+    pass

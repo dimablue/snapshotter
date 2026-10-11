@@ -13,6 +13,25 @@ from PyQt6.QtWidgets import QWidget
 ACCENT = QColor(45, 127, 249)
 
 
+# The Neon's wide scene camera sees a laptop screen small: 120 px markers come out ~27 px wide
+# in its image, which Pupil only detects at full resolution. 180 px leaves margin.
+DEFAULT_MARKER_SIZE = 180
+
+
+def marker_layout(g, size):
+    """Top-left screen position of AprilTags 0-3 inside rect `g` (the visible screen area:
+    the actual overlay window can start below the menu bar), plus the white padding around each.
+    Shared with tools/neon_setup.py, which writes Pupil Capture's matching surface definition."""
+    pad = max(size // 4, 12)  # white quiet zone the detector needs around each tag
+    inset = pad + 8
+    return {
+        0: (g.left() + inset, g.top() + inset),
+        1: (g.right() - inset - size, g.top() + inset),
+        2: (g.right() - inset - size, g.bottom() - inset - size),
+        3: (g.left() + inset, g.bottom() - inset - size),
+    }, pad
+
+
 class Overlay(QWidget):
     def __init__(self, screen_geometry, show_gaze=True):
         super().__init__()
@@ -30,6 +49,7 @@ class Overlay(QWidget):
         self.setGeometry(screen_geometry)
 
         self.crop = None
+        self.check = None        # (target (x, y), number, total) during the guided gaze check
         self.idle = False        # wake mode between selections: draw only toasts and the flash
         self.show_gaze = show_gaze
         self.box = None          # (left, top, w, h) global
@@ -52,15 +72,7 @@ class Overlay(QWidget):
         """
         from pupil_labs.real_time_screen_gaze import marker_generator
 
-        g = available.intersected(self.geometry())  # actual window may start below the menu bar
-        pad = max(size // 4, 12)  # white quiet zone the detector needs around each tag
-        inset = pad + 8
-        corners = {
-            0: (g.left() + inset, g.top() + inset),
-            1: (g.right() - inset - size, g.top() + inset),
-            2: (g.right() - inset - size, g.bottom() - inset - size),
-            3: (g.left() + inset, g.bottom() - inset - size),
-        }
+        corners, pad = marker_layout(available.intersected(self.geometry()), size)
         verts = {}
         self.markers = []
         for marker_id, (x, y) in corners.items():
@@ -139,7 +151,22 @@ class Overlay(QWidget):
             qp.drawText(QRectF(20, 50, self.width()-40, 40), Qt.AlignmentFlag.AlignCenter,
                         instructions[crop.state])
 
-        if self.show_gaze and self.gaze and not self.paused and not self.idle:
+        if self.check is not None:
+            target, n, total = self.check
+            if target is not None:
+                p = self.mapFromGlobal(QPoint(int(target[0]), int(target[1])))
+                qp.setPen(QPen(QColor(255, 255, 255), 4))
+                qp.setBrush(QColor(255, 80, 80, 230))
+                qp.drawEllipse(p, 18, 18)
+                qp.setPen(Qt.PenStyle.NoPen)
+                qp.setBrush(QColor(0, 0, 0))
+                qp.drawEllipse(p, 4, 4)
+            qp.setFont(QFont("Helvetica Neue", 18))
+            qp.setPen(Qt.GlobalColor.white)
+            qp.drawText(QRectF(20, 50, self.width() - 40, 40), Qt.AlignmentFlag.AlignCenter,
+                        f"Look at the red dot ({n}/{total}) — keep your head still")
+
+        if self.show_gaze and self.gaze and not self.paused and not self.idle and self.check is None:
             p = self.mapFromGlobal(QPoint(int(self.gaze[0]), int(self.gaze[1])))
             qp.setPen(Qt.PenStyle.NoPen)
             qp.setBrush(QColor(255, 80, 80, 200))

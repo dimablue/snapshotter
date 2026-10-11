@@ -185,6 +185,52 @@ def test_wake_mode_session(monkeypatch):
         app.overlay.close()
 
 
+def test_guided_gaze_check_fits_and_applies_correction(monkeypatch, tmp_path):
+    import json
+    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--source', 'neon'])
+    monkeypatch.setattr(GazeSnapApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
+    app = GazeSnapApp(parse_args())
+    try:
+        app.start_check()
+        assert app.overlay.check is None and app.check is not None  # drawn from the next tick
+        t = time.monotonic()
+        while app.check is not None:
+            tx, ty = app.check.target
+            # eyes on the dot, but gaze arrives squeezed 15% toward the left and 30 px low
+            app.events.put(('gaze', 0.85 * tx + 10, ty + 30, t))
+            app.tick()
+            t += 0.02
+        saved = json.loads((tmp_path / 'correction.json').read_text())
+        assert saved['screen'] == [app.screen_w, app.screen_h]
+        # the correction now undoes the squeeze for new gaze
+        app.events.put(('gaze', 0.85 * 900 + 10, 400 + 30, t))
+        app.tick()
+        assert abs(app.gaze_hist[-1][1] - 900) < 15 and abs(app.gaze_hist[-1][2] - 400) < 15
+    finally:
+        app.handle.close()
+        app.resize_handle.close()
+        app.overlay.close()
+
+
+def test_gaze_check_refuses_skewed_correction(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'argv', ['gazesnap.py', '--source', 'neon'])
+    monkeypatch.setattr(GazeSnapApp, 'CORRECTION_PATH', str(tmp_path / 'correction.json'))
+    app = GazeSnapApp(parse_args())
+    try:
+        app.start_check()
+        t = time.monotonic()
+        while app.check is not None:
+            tx, ty = app.check.target
+            app.events.put(('gaze', 0.87 * tx + 0.59 * ty - 110, ty, t))  # today's bad data
+            app.tick()
+            t += 0.02
+        assert not (tmp_path / 'correction.json').exists() and app.correction is None
+    finally:
+        app.handle.close()
+        app.resize_handle.close()
+        app.overlay.close()
+
+
 def test_oversize_box_stays_on_screen():
     assert BoxTracker(800, 600, 3000, 2000).current_rect() == (0, 0, 800, 600)
 

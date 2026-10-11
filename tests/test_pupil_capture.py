@@ -75,3 +75,12 @@ def test_run_reports_when_pupil_capture_is_not_running():
     source, events = make_source(pupil_host='127.0.0.1', pupil_port=1)
     source.run()
     assert 'not answering' in events.get_nowait()[1]
+
+
+def test_restart_eye_cameras_sequence():
+    from sources.pupil_capture import restart_eye_cameras
+    sent = []
+    restart_eye_cameras(lambda subject, **kw: sent.append((subject, kw)), sleep=lambda s: None)
+    assert [s for s, _ in sent] == ['stop_plugin', 'start_plugin', 'neon_backend.shared_camera.should_start',
+                                    'neon_backend.auto_activate']
+    assert sent[-1][1] == {'scene': False, 'eyes': True}  # never reopen the scene camera over raw USB

@@ -4,6 +4,8 @@
     python tools/neon_setup.py install   # once, BEFORE starting Pupil Capture (asks for your password)
     python tools/neon_setup.py           # with Pupil Capture running: configure it
     python tools/neon_setup.py calibrate # start the screen-marker calibration
+    python tools/neon_setup.py surface   # write the exact "screen" surface (asks for your password)
+    python tools/neon_setup.py eyes      # restart stalled eye cameras ("no pupil data") without a replug
 
 `install` copies the macOS scene-camera plugin into Pupil Capture's plugin folder (root-owned,
 because Pupil Capture runs with sudo). Configuring then, over Pupil Remote:
@@ -11,6 +13,7 @@ because Pupil Capture runs with sudo). Configuring then, over Pupil Remote:
   2. starts the Neon eye cameras,
   3. turns on the Surface Tracker,
   4. selects Screen Marker calibration with 2D gaze mapping (best for a screen at a fixed distance),
+  5. turns off the 3D pupil detector, which 2D mapping doesn't need, to free CPU for the eyes,
 and reports errors Pupil Capture logs meanwhile, plus pupil confidence per eye.
 """
 import argparse
@@ -25,6 +28,69 @@ import zmq
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "pupil_plugins" / "neon_scene_macos.py"
+# Pupil's default halves the image before looking for markers (quad_decimate 2.0). A laptop
+# screen is small in the Neon's wide scene image, and halved markers aren't found at all.
+TRACKER_ARGS = {"use_high_res": 1.0, "sharpen": 1.0}
+
+
+def screen_markers(marker_size):
+    """Screen-pixel corners of GazeSnap's markers, exactly as the overlay draws them."""
+    from PyQt6.QtWidgets import QApplication
+    sys.path.insert(0, str(ROOT))
+    from overlay import marker_layout
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    screen = app.primaryScreen()
+    corners, _ = marker_layout(screen.availableGeometry().intersected(screen.geometry()), marker_size)
+    return {i: [(x, y), (x + marker_size, y), (x + marker_size, y + marker_size), (x, y + marker_size)]
+            for i, (x, y) in corners.items()}
+
+
+def surface_definition(verts, name="screen"):
+    """Pupil Capture surface (definitions v01) spanning GazeSnap's markers, which is the frame
+    sources/pupil_capture.py maps back to screen pixels. Surface coordinates have y up."""
+    xs = [x for v in verts.values() for x, _ in v]
+    ys = [y for v in verts.values() for _, y in v]
+    left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+
+    def uv(x, y):
+        return [(x - left) / (right - left), 1 - (y - top) / (bottom - top)]
+
+    markers = []
+    for i, (tl, tr, br, bl) in sorted(verts.items()):
+        # Pupil stores AprilTag corners as top-right, top-left, bottom-left, bottom-right
+        markers.append({"uid": f"apriltag_v3:tag36h11:{i}", "verts_uv": [uv(*tr), uv(*tl), uv(*bl), uv(*br)]})
+    surface = {"version": 1, "name": name, "real_world_size": {"x": 1.0, "y": 1.0},
+               "reg_markers": markers, "registered_markers_dist": markers,
+               "build_up_status": 1.0, "deprecated": False}
+    return {"surfaces": [surface]}
+
+
+def write_surface(pupil_dir, host, port, marker_size):
+    import tempfile
+    definition = surface_definition(screen_markers(marker_size))
+    target = Path(pupil_dir).expanduser() / "capture_settings" / "surface_definitions_v01"
+    with tempfile.NamedTemporaryFile(suffix=".surface", delete=False) as f:
+        f.write(msgpack.packb(definition, use_bin_type=True))
+    remote = Remote(host, port)
+    try:
+        remote.ask("v")
+        running = True
+    except zmq.Again:
+        running = False
+        remote = None
+    if running:  # the tracker saves its own surfaces when it stops; stop it before replacing them
+        Remote(host, port).notify("stop_plugin", name="Surface_Tracker_Online")
+        time.sleep(1.5)
+    print(f"writing the 'screen' surface (4 markers) -> {target} (needs your password)")
+    if subprocess.run(["sudo", "cp", f.name, str(target)]).returncode:
+        sys.exit("copy failed")
+    Path(f.name).unlink()
+    if running:
+        Remote(host, port).notify("start_plugin", name="Surface_Tracker_Online", args=TRACKER_ARGS)
+        print("Surface Tracker restarted with the new surface.")
+    else:
+        print("Pupil Capture isn't running; it will load the surface when it starts.")
 
 
 def install(pupil_dir):
@@ -91,19 +157,26 @@ def configure(remote, camera, seconds):
                  "  cd ~/Downloads/pupil/pupil_src && sudo ../.venv/bin/python main.py capture")
     print(f"connected to Pupil Capture {version}")
     sub = remote.subscribe("pupil.", "logging.warning", "logging.error", "logging.info")
-    steps = [
+    steps = [  # eyes first: Pupil's Neon activation looks for the scene camera on raw USB
+        ("Neon eye cameras", "neon_backend.auto_activate", dict(scene=False, eyes=True)),
         ("scene camera through macOS", "start_plugin",
          dict(name="Neon_Scene_MacOS_Source", args={"camera_name": camera})),
-        ("Neon eye cameras", "neon_backend.auto_activate", dict(scene=False, eyes=True)),
-        ("Surface Tracker", "start_plugin", dict(name="Surface_Tracker_Online", args={})),
+        ("Surface Tracker (full-resolution marker detection)", "start_plugin",
+         dict(name="Surface_Tracker_Online", args=TRACKER_ARGS)),
         ("Screen Marker calibration, 2D gaze mapping", "start_plugin",
          dict(name="ScreenMarkerChoreographyPlugin", args={"selected_gazer_class_name": "Gazer2D"})),
     ]
+    for eye in ("eye0", "eye1"):
+        # 2D mapping doesn't use the 3D eye model; it only costs CPU the 2D detector needs
+        steps.append((f"3D pupil detector off in {eye}", "stop_eye_plugin",
+                      dict(target=eye, name="Pye3DPlugin")))
     for label, subject, payload in steps:
         remote.notify(subject, **payload)
         print(f"- {label}")
     print(f"watching for {seconds:.0f} s…")
     conf = watch(sub, seconds)
+    for eye in ("eye0", "eye1"):  # again: eye processes that were still starting missed the first one
+        remote.notify("stop_eye_plugin", target=eye, name="Pye3DPlugin")
     ok = True
     for eye in (0, 1):
         cs = sorted(conf.get(eye, []))
@@ -122,18 +195,48 @@ def configure(remote, camera, seconds):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("action", nargs="?", choices=["install", "configure", "calibrate"], default="configure")
+    p.add_argument("action", nargs="?", choices=["install", "configure", "calibrate", "surface", "eyes"], default="configure")
     p.add_argument("--pupil-dir", default="~/Downloads/pupil")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=50020)
     p.add_argument("--camera", default="Neon", help="macOS camera name to use for the scene camera")
     p.add_argument("--seconds", type=float, default=8)
+    p.add_argument("--marker-size", type=int, default=None, help="same as gazesnap.py --marker-size")
     a = p.parse_args()
     if a.action == "install":
         return install(a.pupil_dir)
+    if a.action == "surface":
+        if a.marker_size is None:
+            sys.path.insert(0, str(ROOT))
+            from overlay import DEFAULT_MARKER_SIZE
+            a.marker_size = DEFAULT_MARKER_SIZE
+        return write_surface(a.pupil_dir, a.host, a.port, a.marker_size)
     remote = Remote(a.host, a.port)
+    if a.action == "eyes":
+        sys.path.insert(0, str(ROOT))
+        from sources.pupil_capture import restart_eye_cameras
+        try:
+            print("restarting the Neon eye cameras (about 10 s)…")
+            restart_eye_cameras(remote.notify)
+        except zmq.Again:
+            sys.exit("Pupil Capture is not answering. Start it first.")
+        conf = watch(remote.subscribe("pupil."), 4)
+        for eye in (0, 1):
+            cs = sorted(conf.get(eye, []))
+            print(f"eye{eye}: " + (f"{len(cs) / 4:.0f} Hz, median confidence {cs[len(cs) // 2]:.2f}" if cs
+                                   else "still no data: unplug and replug the Neon"))
+        return
     if a.action == "calibrate":
-        print(remote.ask("C"))
+        try:
+            # Pupil forgets the 2D choice on restart, and the 3D mapper has no data once the 3D
+            # detector is off ("Not sufficient pupil data"): select 2D every time.
+            remote.notify("start_plugin", name="ScreenMarkerChoreographyPlugin",
+                          args={"selected_gazer_class_name": "Gazer2D"})
+            time.sleep(1)
+            print(remote.ask("C"))
+        except zmq.Again:
+            sys.exit("Pupil Capture is not answering. Start it first:\n"
+                     "  cd ~/Downloads/pupil/pupil_src && sudo ../.venv/bin/python main.py capture")
         print("Look at the center of each bullseye; keep your head still. Accuracy prints in Pupil Capture.")
         sub = remote.subscribe("logging.info", "logging.error", "notify.calibration")
         end = time.monotonic() + 60

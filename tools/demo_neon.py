@@ -84,10 +84,13 @@ def main():
     app = QApplication(sys.argv[:1])
     screen = app.primaryScreen()
     W, H = screen.geometry().width(), screen.geometry().height()
-    # same marker rectangle as Overlay.place_markers with the default --marker-size 120
-    g = screen.availableGeometry().intersected(screen.geometry())
-    inset = 120 // 4 + 8
-    left, top, right, bottom = g.left() + inset, g.top() + inset, g.right() - inset, g.bottom() - inset
+    # same marker rectangle as Overlay.place_markers with the default marker size
+    sys.path.insert(0, str(ROOT))
+    from overlay import DEFAULT_MARKER_SIZE, marker_layout
+    corners, _ = marker_layout(screen.availableGeometry().intersected(screen.geometry()), DEFAULT_MARKER_SIZE)
+    xs = [x for x, _ in corners.values()] + [x + DEFAULT_MARKER_SIZE for x, _ in corners.values()]
+    ys = [y for _, y in corners.values()] + [y + DEFAULT_MARKER_SIZE for _, y in corners.values()]
+    left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
     at, blinks, says, length = (voice_script if args.scenario == "voice" else box_script)(W, H)
 
     ctx = zmq.Context.instance()

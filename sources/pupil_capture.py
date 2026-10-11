@@ -19,7 +19,22 @@ import time
 from .base import GazeSource
 
 RECENT_S = 0.1  # pupil samples older than this don't count towards open/closed
+EYE_RESTART_AFTER = 5  # s without pupil data -> restart Pupil's Neon eye cameras
+EYE_RESTART_EVERY = 30  # ...at most this often
 MIN_BLINK_S = 0.05  # ignore single-frame confidence dips
+
+
+def restart_eye_cameras(notify, sleep=time.sleep):
+    """Pupil's Neon eye-camera process sometimes stalls on macOS USB ("3 seconds since last
+    frame… Attempting reinit") and never recovers. Restarting its Neon manager fixes it without
+    a replug. `notify(subject, **payload)` sends a Pupil Remote notification."""
+    notify("stop_plugin", name="Neon_Manager")
+    sleep(4)
+    notify("start_plugin", name="Neon_Manager", args={})
+    sleep(2)
+    notify("neon_backend.shared_camera.should_start")
+    sleep(4)
+    notify("neon_backend.auto_activate", scene=False, eyes=True)
 
 
 class PupilCaptureSource(GazeSource):
@@ -32,6 +47,7 @@ class PupilCaptureSource(GazeSource):
         self.eye_conf = {}  # eye id -> (confidence, monotonic t)
         self.closed_since = None
         self.last_surface = self.last_pupil = time.monotonic()
+        self.pupil_seen = self.eyes_restarted = time.monotonic()
         self.other_surfaces = set()
 
     def screen_rect(self):
@@ -65,7 +81,7 @@ class PupilCaptureSource(GazeSource):
                            g["timestamp"] - self.offset)
 
     def on_pupil(self, msg):
-        self.last_pupil = time.monotonic()
+        self.last_pupil = self.pupil_seen = time.monotonic()
         if getattr(self.args, "no_blink_capture", False):
             return
         t = msg["timestamp"] - self.offset
@@ -109,9 +125,24 @@ class PupilCaptureSource(GazeSource):
             sub.subscribe("pupil.")
             self.emit_status("neon: connected to Pupil Capture")
             self.last_surface = self.last_pupil = time.monotonic()
+            self.pupil_seen = self.eyes_restarted = time.monotonic()
+
+            def notify(subject, **payload):
+                payload["subject"] = subject
+                req.send_string(f"notify.{subject}", zmq.SNDMORE)
+                req.send(msgpack.packb(payload, use_bin_type=True))
+                req.recv_string()
 
             while not self.stopped:
                 now = time.monotonic()
+                if now - self.pupil_seen > EYE_RESTART_AFTER and now - self.eyes_restarted > EYE_RESTART_EVERY:
+                    self.eyes_restarted = now
+                    self.emit_status("neon: eye cameras stalled; restarting them (about 10 s)")
+                    try:
+                        restart_eye_cameras(notify)
+                    except zmq.Again:
+                        self.emit_status("neon: Pupil Capture stopped answering")
+                    self.pupil_seen = time.monotonic()
                 if now - self.last_surface > 3:
                     self.emit_status(f"neon: no gaze on surface {self.args.surface!r}. In Pupil Capture: "
                                      "Surface Tracker on, surface added, markers in view, calibrated")

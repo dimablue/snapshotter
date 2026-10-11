@@ -52,9 +52,11 @@ def commands_in(text, final=True):
     words = re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
     out, i = [], 0
     while i < len(words):
-        if words[i:i + 2] in WAKE:
-            # "hey Neon ... take a screenshot": the capture phrase becomes "start"
-            j, started = i + 2, False
+        if words[i] == "neon" or words[i:i + 2] in WAKE:
+            # "hey Neon ... take a screenshot": the capture phrase becomes "start". Only "neon"
+            # is required: speech recognition often hears "hey" as "a" or drops it.
+            j = i + 1 if words[i] == "neon" else i + 2
+            started = False
             while j < len(words):
                 m = _match(words, j, final)
                 if m and m[0] == "capture":
@@ -65,7 +67,7 @@ def commands_in(text, final=True):
                     break  # another command, e.g. "hey Neon, cancel"
                 j += m[1] if m else 1
             if not started:
-                i += 2
+                i = j if words[i] == "neon" else i + 2
             continue
         m = _match(words, i, final)
         if m:

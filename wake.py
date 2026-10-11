@@ -21,7 +21,8 @@ MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 MODEL_DIR = Path.home() / ".cache" / "gazesnap"
 # Restricting Vosk to these phrases is what makes it accurate; anything else becomes [unk].
 GRAMMAR = ["hey neon take a screenshot", "hey neon take screenshot", "hey neon screenshot",
-           "okay neon take a screenshot", "ok neon take a screenshot", "hey neon", "[unk]"]
+           "okay neon take a screenshot", "ok neon take a screenshot", "neon take a screenshot",
+           "hey neon", "[unk]"]
 
 
 def model_path(status):

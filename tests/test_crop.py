@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import CropSelector
+from core import CropSelector, longest_fixation
 
 def hold(c, x, y, t):
     action = None
@@ -50,6 +50,19 @@ def test_edges_and_reset():
     assert c.rect == (0, 0, 1440, 900)
     c.reset()
     assert c.state == "first" and c.rect is None and c.progress == 0
+
+def test_fixation_beats_a_late_glance():
+    rest = [(i * .02, 800 + (i % 3), 500 - (i % 2)) for i in range(30)]   # 0.6 s on the corner
+    glance = [(.6 + i * .02, 700, 60) for i in range(12)]                  # 0.24 s at the status text
+    x, y = longest_fixation(rest + glance)
+    assert abs(x - 801) < 2 and abs(y - 500) < 2
+    assert longest_fixation([(i * .02, i * 30, i * 30) for i in range(20)]) is None
+
+def test_set_corner_while_dragging():
+    c = CropSelector(1440, 900)
+    c.start_at(100, 100)
+    c.set_corner(600, 400)
+    assert c.rect == (100, 100, 500, 300) and c.has_rect()
 
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]

@@ -27,7 +27,9 @@ def avfoundation_cameras():
         import AVFoundation as AVF
     except ImportError:
         return []
-    return [str(d.localizedName()) for d in AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)]
+    devices = AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo)
+    # OpenCV numbers cameras in uniqueID order, not in the order macOS lists them
+    return [str(d.localizedName()) for d in sorted(devices, key=lambda d: str(d.uniqueID()))]
 
 
 def gray_block_fraction(gray):

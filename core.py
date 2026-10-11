@@ -156,6 +156,27 @@ class BlinkDetector:
         return t_start
 
 
+def longest_fixation(samples, min_duration=0.2, radius=40.0):
+    """Centroid (x, y) of the longest stretch of gaze samples (t, x, y) that stays within
+    `radius` px of its running centroid for at least `min_duration` seconds, or None.
+
+    Used to pick a corner from where the eyes actually rested, instead of wherever they
+    happen to be when a (slow) voice command arrives.
+    """
+    pts = list(samples)
+    best, best_dur, i = None, 0.0, 0
+    while i < len(pts):
+        cx, cy, n, j = pts[i][1], pts[i][2], 1, i + 1
+        while j < len(pts) and math.hypot(pts[j][1] - cx, pts[j][2] - cy) <= radius:
+            cx, cy, n = cx + (pts[j][1] - cx) / (n + 1), cy + (pts[j][2] - cy) / (n + 1), n + 1
+            j += 1
+        dur = pts[j - 1][0] - pts[i][0]
+        if dur >= min_duration and dur > best_dur:
+            best, best_dur = (cx, cy), dur
+        i = j if j > i + 1 else i + 1
+    return best
+
+
 class CropSelector:
     """Dwell selection of a crop rectangle, independent of GUI and hardware.
 
@@ -187,6 +208,16 @@ class CropSelector:
         self.reset()
         self.anchor = (min(max(x, 0), self.screen_w), min(max(y, 0), self.screen_h))
         self.state = "second"
+
+    def set_corner(self, x, y):
+        """Set the opposite corner directly (e.g. from a fixation) while dragging."""
+        if self.state != "second" or self.anchor is None:
+            return
+        x = min(max(x, 0), self.screen_w)
+        y = min(max(y, 0), self.screen_h)
+        ax, ay = self.anchor
+        self.point = (x, y)
+        self.rect = (int(min(ax, x)), int(min(ay, y)), int(abs(x - ax)), int(abs(y - ay)))
 
     def has_rect(self):
         """True while dragging or previewing a rectangle big enough to capture."""
@@ -224,3 +255,75 @@ class CropSelector:
             px, py = point
             self.rect = (int(min(ax, px)), int(min(ay, py)), int(abs(px - ax)), int(abs(py - ay)))
             self.state = "preview"
+
+
+class ScreenCheck:
+    """Guided accuracy check: show targets one by one, record where gaze lands on each, then
+    fit a correction (affine, screen px -> screen px) that maps measured gaze onto the targets.
+
+    Pure logic: the app feeds raw gaze with update(), reads `target` to draw, and calls result()
+    when `done`. Times are monotonic seconds.
+    """
+    def __init__(self, targets, settle=0.8, collect=1.0):
+        self.targets = list(targets)
+        self.settle, self.collect = settle, collect
+        self.index = 0
+        self.started = None
+        self.samples = [[] for _ in self.targets]
+
+    @property
+    def done(self):
+        return self.index >= len(self.targets)
+
+    @property
+    def target(self):
+        return None if self.done else self.targets[self.index]
+
+    def update(self, x, y, t):
+        if self.done:
+            return
+        if self.started is None:
+            self.started = t
+        age = t - self.started
+        if age >= self.settle + self.collect:
+            self.index += 1
+            self.started = t
+            return
+        if age >= self.settle:  # ignore the jump to the new dot
+            self.samples[self.index].append((x, y))
+
+    def measured(self):
+        """Median gaze per target, or None where no gaze arrived."""
+        out = []
+        for pts in self.samples:
+            if len(pts) < 5:
+                out.append(None)
+                continue
+            xs, ys = sorted(p[0] for p in pts), sorted(p[1] for p in pts)
+            out.append((xs[len(xs) // 2], ys[len(ys) // 2]))
+        return out
+
+    def result(self):
+        """Errors before/after correction (px) and the fitted affine [[a, b, c], [d, e, f]]."""
+        import numpy as np
+
+        pairs = [(m, t) for m, t in zip(self.measured(), self.targets) if m is not None]
+        if len(pairs) < 4:
+            return {"points": len(pairs), "affine": None}
+        m = np.array([p[0] for p in pairs], float)
+        t = np.array([p[1] for p in pairs], float)
+        design = np.column_stack([m, np.ones(len(m))])
+        coef, *_ = np.linalg.lstsq(design, t, rcond=None)  # (3, 2)
+        affine = coef.T  # rows: x' and y'
+        fitted = design @ coef
+        before = np.hypot(*(m - t).T)
+        after = np.hypot(*(fitted - t).T)
+        return {"points": len(pairs), "affine": affine.round(6).tolist(),
+                "error_before": float(before.mean()), "error_after": float(after.mean()),
+                "worst_before": float(before.max()),
+                "offsets": [(round(float(dx)), round(float(dy))) for dx, dy in (m - t)]}
+
+
+def apply_affine(affine, x, y):
+    (a, b, c), (d, e, f) = affine
+    return a * x + b * y + c, d * x + e * y + f

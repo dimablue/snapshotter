@@ -11,6 +11,8 @@ Terminal commands while running (type, then Enter):
     n        toggle narration                   q  quit
 """
 import argparse
+import collections
+import json
 import os
 import queue
 import signal
@@ -24,8 +26,9 @@ from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMenu, QSyste
 
 from action_flow import ActionFlow, reply_intent, save_draft
 from capture import grab_region, play_shutter
-from core import BlinkDetector, BoxTracker, GazeFilter, CropSelector
-from overlay import Overlay, DragHandle, ResizeHandle
+from core import (BlinkDetector, BoxTracker, GazeFilter, CropSelector, ScreenCheck, apply_affine,
+                  longest_fixation)
+from overlay import DEFAULT_MARKER_SIZE, Overlay, DragHandle, ResizeHandle
 from sources import SOURCE_NAMES, get_source_class
 
 
@@ -71,7 +74,11 @@ def parse_args():
     p.add_argument("--ear-ratio", type=float, default=0.7, help="eye closed below this x open-eye EAR")
     # neon (both)
     p.add_argument("--flip-y", action="store_true", help="use if the box moves opposite to your gaze vertically")
-    p.add_argument("--marker-size", type=int, default=120)
+    p.add_argument("--marker-size", type=int, default=DEFAULT_MARKER_SIZE,
+                   help="screen size of the Neon markers (keep in sync with tools/neon_setup.py surface)")
+    p.add_argument("--check", action="store_true",
+                   help="start with the guided gaze check: look at 9 dots; fits and saves a correction")
+    p.add_argument("--no-correction", action="store_true", help="ignore the saved gaze correction")
     # neon via Pupil Capture (USB)
     p.add_argument("--pupil-host", default="127.0.0.1", help="machine running Pupil Capture")
     p.add_argument("--pupil-port", type=int, default=50020, help="Pupil Remote port in Pupil Capture")
@@ -136,7 +143,10 @@ class GazeSnapApp:
         self.crop_active = args.selection == "crop"
         self.crop_by_voice = False  # selection started by "hey Neon"; ends after capture
         self.last_gaze = None
-        self.gaze_xy = None  # latest filtered gaze/cursor, where voice pins the first corner
+        self.gaze_xy = None  # latest filtered gaze/cursor
+        self.gaze_hist = collections.deque(maxlen=400)  # (t, x, y): recent gaze, for fixations
+        self.check = None  # ScreenCheck while the guided gaze check runs
+        self.correction = None if args.no_correction else self.load_correction()
         self.overlay.crop = self.crop if self.crop_active else None
         self.overlay.idle = args.wake
         self.paused = False
@@ -403,6 +413,8 @@ class GazeSnapApp:
                     self.log("analysis: finished")
 
     def log(self, msg):
+        if self.overlay.idle and msg.startswith(("neon: no gaze on surface", "neon: no pupil data")):
+            return  # markers are hidden between selections, so no surface gaze is expected
         print(f"[gazesnap] {msg}", flush=True)
         if self.overlay.idle and not msg.startswith(("saved", "wake:", "analysis:", "capture failed", "voice: off")):
             return  # stay invisible between selections
@@ -423,11 +435,19 @@ class GazeSnapApp:
             kind = ev[0]
             if kind == "gaze":
                 _, x, y, t = ev
+                if self.check is not None:  # the check measures raw gaze, so no correction
+                    self.check.update(x, y, t)
+                    if self.check.done:
+                        self.finish_check()
+                    continue
+                if self.correction:
+                    x, y = apply_affine(self.correction, x, y)
                 fx, fy = self.filter(x, y, t)
                 if not self.manual:
                     self.tracker.update(fx, fy, t)
                 self.last_gaze = t
                 self.gaze_xy = (fx, fy)
+                self.gaze_hist.append((t, fx, fy))
                 if self.pending_start is not None and t >= self.pending_start:
                     self.pending_start = None
                     self.start_selection()
@@ -466,6 +486,8 @@ class GazeSnapApp:
             self.finish_voice_selection()
         if self.crop_active and (self.last_gaze is None or now - self.last_gaze > 0.25):
             self.crop.clear_dwell()
+        self.overlay.check = None if self.check is None else (
+            self.check.target, self.check.index + 1, len(self.check.targets))
         self.overlay.box = self.tracker.current_rect()
         self.overlay.gaze = (self.tracker.x, self.tracker.y)
         self.overlay.stable = self.tracker.stable
@@ -488,11 +510,75 @@ class GazeSnapApp:
         self.crop.reset()
         self.overlay.crop = self.crop if active else None
 
+    # --- guided gaze check ("look at the dot") ------------------------------------
+    CORRECTION_PATH = os.path.expanduser("~/.cache/gazesnap/gaze_correction.json")
+
+    def load_correction(self):
+        if not self.source.needs_markers:
+            return None  # only eye-tracker gaze needs correcting
+        try:
+            with open(self.CORRECTION_PATH) as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if saved.get("screen") != [self.screen_w, self.screen_h]:
+            return None  # made for another display
+        self.log("using saved gaze correction (python gazesnap.py --check to redo it)")
+        return saved["affine"]
+
+    def start_check(self):
+        if not self.source.needs_markers:
+            self.log("the gaze check is for the Neon (--source neon)")
+            return
+        verts = [p for v in self.source.marker_verts.values() for p in v]
+        left, top = min(x for x, _ in verts), min(y for _, y in verts)
+        right, bottom = max(x for x, _ in verts), max(y for _, y in verts)
+        # 3 x 3 dots across the area the markers span, clear of the markers themselves
+        targets = [(left + fx * (right - left), top + fy * (bottom - top))
+                   for fy in (0.22, 0.5, 0.78) for fx in (0.15, 0.5, 0.85)]
+        self.check = ScreenCheck(targets)
+        self.overlay.idle = False
+        self.set_crop_active(False)
+        self.log("gaze check: look at each dot until it moves (about 2 s each); keep your head still")
+
+    def finish_check(self):
+        result, self.check = self.check.result(), None
+        self.overlay.check = None
+        if not result["affine"]:
+            self.log(f"gaze check failed: gaze arrived on only {result['points']} of 9 dots "
+                     "(eyes tracked? markers visible?)")
+        else:
+            self.log(f"gaze check: average error {result['error_before']:.0f} px "
+                     f"(worst {result['worst_before']:.0f} px) -> {result['error_after']:.0f} px corrected")
+            print("[gazesnap] offsets per dot (dx, dy px, rows top to bottom):", result["offsets"], flush=True)
+            (a, b, _), (d, e, _) = result["affine"]
+            plausible = (abs(b) < 0.15 and abs(d) < 0.15 and 0.75 < a < 1.3 and 0.75 < e < 1.3
+                         and result["error_after"] < 80)
+            if not plausible:
+                # a real tracking error is a shift or mild stretch, not a skew or a big leftover:
+                # the Pupil calibration itself is off (glasses moved?), so don't paper over it
+                self.log("gaze check: errors are too irregular to correct. Recalibrate in Pupil "
+                         "Capture (python tools/neon_setup.py calibrate), then run the check again")
+            elif result["error_after"] < result["error_before"]:
+                os.makedirs(os.path.dirname(self.CORRECTION_PATH), exist_ok=True)
+                with open(self.CORRECTION_PATH, "w") as f:
+                    json.dump({"affine": result["affine"], "screen": [self.screen_w, self.screen_h],
+                               "created": time.strftime("%Y-%m-%d %H:%M")}, f)
+                self.correction = result["affine"]
+                self.log(f"gaze correction saved and applied ({self.CORRECTION_PATH})")
+        if self.args.wake:
+            self.go_idle()
+
+    def recent_fixation(self, seconds):
+        now = time.monotonic()
+        return longest_fixation([s for s in self.gaze_hist if now - s[0] <= seconds])
+
     def start_selection(self):
         """Pin the first corner where the user is looking; the rectangle then follows gaze."""
         if self.paused or self.snapping:
             return
-        x, y = self.gaze_xy or (self.screen_w / 2, self.screen_h / 2)
+        # where the eyes rested while saying the wake phrase, not where they are now
+        x, y = self.recent_fixation(1.5) or self.gaze_xy or (self.screen_w / 2, self.screen_h / 2)
         self.set_crop_active(True)
         self.crop_by_voice = True
         self.crop.start_at(x, y)
@@ -504,6 +590,11 @@ class GazeSnapApp:
         elif cmd == "start":  # "hey Neon, take a screenshot"
             self.start_selection()
         elif cmd == "capture" or (cmd == "" and self.crop_active):  # voice, or Enter in crop mode
+            if self.crop_by_voice and self.crop.state == "second":
+                # recognition lags the word: use where the eyes rested, not where they are now
+                corner = self.recent_fixation(2.0)
+                if corner:
+                    self.crop.set_corner(*corner)
             if self.crop_active and self.crop.has_rect():
                 self.crop.state = "done"
                 self.snap(self.crop.rect)
@@ -551,10 +642,12 @@ class GazeSnapApp:
             self.set_analysis_enabled(not self.analysis_enabled)
         elif cmd == "s":
             self.cancel_analysis()
+        elif cmd == "k":
+            self.start_check()
         elif cmd == "q":
             self.app.quit()
         else:
-            print("commands: Enter=snap/save crop  start=new selection at gaze  c=crop toggle  r=retry  "
+            print("commands: Enter=snap/save crop  start=new selection at gaze  c=crop toggle  r=retry  k=gaze check  "
                   "+/-=resize  p=pause  "
                   "m=manual/follow  v=voice  n=narration  a=analysis  s=stop speech  q=quit", flush=True)
 
@@ -630,6 +723,8 @@ class GazeSnapApp:
         elif self.args.voice_control:
             QTimer.singleShot(0, self.toggle_voice)
         self.timer.start(16)  # ~60 Hz; also lets Python handle Ctrl+C
+        if self.args.check:
+            QTimer.singleShot(1500, self.start_check)  # give the tracker a moment to find the markers
         if not self.args.wake:
             hint = "press Enter in the terminal" if self.source.uses_cursor and self.args.source == "mouse" \
                 else "long blink or double blink"

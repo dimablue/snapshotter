@@ -35,7 +35,9 @@ def main():
         print(f"Pupil Capture not answering at {a.host}:{a.port}. Is it running? "
               "(Pupil Remote plugin must be on; it is by default.)")
         return
-    print(f"Connected to Pupil Capture {version}. Blink a few times for {a.seconds:.0f} s...")
+    print(f"Connected to Pupil Capture {version}. Recording for {a.seconds:.0f} s, starting now:\n"
+          "  with GazeSnap's markers on screen, look at each screen corner for ~2 s "
+          "(top-left, top-right, bottom-right, bottom-left), and blink a few times.")
 
     sub = ctx.socket(zmq.SUB)
     sub.connect(f"tcp://{a.host}:{sub_port}")
@@ -45,6 +47,7 @@ def main():
     conf = {}       # eye id -> [confidence, ...]
     latest = {}     # eye id -> (confidence, timestamp)
     surfaces = {}   # name -> gaze samples
+    reach = {}      # name -> list of confident (x, y) on the surface
     blinks = []
     closed_since = None
     end = time.monotonic() + a.seconds
@@ -56,6 +59,8 @@ def main():
         msg = msgpack.unpackb(payload, raw=False)
         if topic.startswith("surfaces."):
             surfaces[msg["name"]] = surfaces.get(msg["name"], 0) + len(msg["gaze_on_surfaces"])
+            reach.setdefault(msg["name"], []).extend(
+                g["norm_pos"] for g in msg["gaze_on_surfaces"] if g["confidence"] > 0.6)
         elif topic.endswith(".2d"):
             t = msg["timestamp"]
             conf.setdefault(msg["id"], []).append(msg["confidence"])
@@ -79,6 +84,12 @@ def main():
     if surfaces:
         for name, n in surfaces.items():
             print(f"surface {name!r}: {n / a.seconds:.0f} gaze samples/s")
+            pts = reach.get(name, [])
+            if pts:
+                xs, ys = sorted(p[0] for p in pts), sorted(p[1] for p in pts)
+                lo, hi = int(len(pts) * 0.02), int(len(pts) * 0.98) - 1  # ignore stray samples
+                print(f"  gaze reached x {xs[lo]:.2f}..{xs[hi]:.2f}, y {ys[lo]:.2f}..{ys[hi]:.2f} "
+                      "(look at all four corners: both should span about 0..1)")
     else:
         print("no surface data (fine for now; GazeSnap's markers must be on screen for this)")
     print("\nNext: python gazesnap.py --source neon")
