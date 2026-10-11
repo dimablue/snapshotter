@@ -131,8 +131,8 @@ class Overlay(QWidget):
                 qp.drawArc(QRectF(p.x()-22, p.y()-22, 44, 44), 90*16, -int(crop.progress*360*16))
             qp.setFont(QFont("Helvetica Neue", 16))
             instructions = {"first": "Look at the first corner and hold steady",
-                            "second": "Look at the opposite corner and hold steady",
-                            "preview": "Say “take a screenshot” to save · “retry” · “cancel”",
+                            "second": "Look at the opposite corner, then say “capture” · “retry” · “cancel”",
+                            "preview": "Say “capture” to save · “retry” · “cancel”",
                             "done": "Saving…"}
             qp.setPen(Qt.GlobalColor.white)
             qp.drawText(QRectF(20, 50, self.width()-40, 40), Qt.AlignmentFlag.AlignCenter,

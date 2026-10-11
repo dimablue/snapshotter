@@ -2,7 +2,7 @@
 """Demo `--source neon` without the headset: plays a scripted gaze session through a
 stand-in for Pupil Capture's network API, and starts GazeSnap connected to it.
 
-    python tools/demo_neon.py                 # dwell crop: corner, opposite corner, voice "take a screenshot"
+    python tools/demo_neon.py                 # "hey Neon, take a screenshot", drag with gaze, "capture"
     python tools/demo_neon.py --scenario box  # box follows gaze; long blink, double blink
 
 Voice commands are simulated: the demo sends GazeSnap the same command the microphone would.
@@ -30,8 +30,8 @@ def lerp(p, q, k):
     return p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k
 
 
-def crop_script(W, H):
-    """Hold corner A, hold corner B, say "retry"; again, then say "take a screenshot"."""
+def voice_script(W, H):
+    """Say "hey Neon, take a screenshot" at a corner, drag, "retry" from a new corner, drag, "capture"."""
     a, b = (0.30 * W, 0.28 * H), (0.62 * W, 0.62 * H)
     a2, b2 = (0.22 * W, 0.35 * H), (0.55 * W, 0.7 * H)
 
@@ -42,17 +42,18 @@ def crop_script(W, H):
     def at(s):
         if s < 2.5:
             return wander(s), "look around"
-        if s < 4.5:
-            return lerp(wander(2.5), a, (s - 2.5) / 0.4), "hold first corner"
-        if s < 7.5:
-            return lerp(a, b, (s - 4.5) / 0.8), "move to opposite corner and hold"
-        if s < 9.5:
-            return lerp(b, a2, (s - 7.5) / 0.4), "hold first corner again"
-        if s < 12.5:
-            return lerp(a2, b2, (s - 9.5) / 0.8), "move to opposite corner and hold"
-        u = (s - 12.5) / 3 * 2 * math.pi
+        if s < 3.5:
+            return lerp(wander(2.5), a, (s - 2.5) / 0.4), "look at the first corner"
+        if s < 5.0:
+            return lerp(a, b, (s - 3.5) / 1.2), "drag with your eyes"
+        if s < 6.0:
+            return lerp(b, a2, (s - 5.0) / 0.4), "look at a better first corner"
+        if s < 8.0:
+            return lerp(a2, b2, (s - 6.0) / 1.5), "drag with your eyes"
+        u = (s - 8.5) / 3 * 2 * math.pi
         return (0.5 * W + 0.2 * W * math.cos(u), 0.45 * H + 0.15 * H * math.sin(u)), "look around"
-    return at, [], [(7.0, "r", "retry"), (12.0, "", "take a screenshot")], 15
+    says = [(3.2, "start", "hey Neon, take a screenshot"), (5.7, "r", "retry"), (8.0, "capture", "capture")]
+    return at, [], says, 10.5
 
 
 def box_script(W, H):
@@ -76,7 +77,7 @@ def box_script(W, H):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--scenario", choices=["crop", "box"], default="crop")
+    p.add_argument("--scenario", choices=["voice", "box"], default="voice")
     p.add_argument("--port", type=int, default=50120, help="stand-in Pupil Remote port")
     args, gazesnap_args = p.parse_known_args()
 
@@ -87,7 +88,7 @@ def main():
     g = screen.availableGeometry().intersected(screen.geometry())
     inset = 120 // 4 + 8
     left, top, right, bottom = g.left() + inset, g.top() + inset, g.right() - inset, g.bottom() - inset
-    at, blinks, says, length = (crop_script if args.scenario == "crop" else box_script)(W, H)
+    at, blinks, says, length = (voice_script if args.scenario == "voice" else box_script)(W, H)
 
     ctx = zmq.Context.instance()
     rep = ctx.socket(zmq.REP)
@@ -108,8 +109,7 @@ def main():
                 rep.send_string("demo")
 
     threading.Thread(target=remote, daemon=True).start()
-    selection = "crop" if args.scenario == "crop" else "box"
-    cmd = [sys.executable, str(ROOT / "gazesnap.py"), "--source", "neon", "--selection", selection,
+    cmd = [sys.executable, str(ROOT / "gazesnap.py"), "--source", "neon",
            "--pupil-port", str(args.port), *gazesnap_args]
     print("demo: starting", " ".join(cmd[1:]), flush=True)
     gazesnap = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.PIPE, text=True)

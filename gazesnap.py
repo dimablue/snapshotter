@@ -107,7 +107,9 @@ class GazeSnapApp:
 
         self.crop = CropSelector(self.screen_w, self.screen_h, max(200, args.dwell_ms))
         self.crop_active = args.selection == "crop"
+        self.crop_by_voice = False  # selection started by "hey Neon"; ends after capture
         self.last_gaze = None
+        self.gaze_xy = None  # latest filtered gaze/cursor, where voice pins the first corner
         self.overlay.crop = self.crop if self.crop_active else None
         self.paused = False
         self.snapping = False
@@ -181,6 +183,7 @@ class GazeSnapApp:
                 if not self.manual:
                     self.tracker.update(fx, fy, t)
                 self.last_gaze = t
+                self.gaze_xy = (fx, fy)
                 if self.crop_active and not self.paused and not self.snapping and time.monotonic() - t <= 0.25:
                     self.crop.update(fx, fy, t)
             elif kind == "blink":
@@ -208,21 +211,40 @@ class GazeSnapApp:
         self.resize_handle.setVisible(show_handles)
         self.overlay.update()
 
+    def set_crop_active(self, active):
+        self.crop_active = active
+        self.crop_by_voice = False
+        self.crop.reset()
+        self.overlay.crop = self.crop if active else None
+
+    def start_selection(self):
+        """Pin the first corner where the user is looking; the rectangle then follows gaze."""
+        if self.paused or self.snapping:
+            return
+        x, y = self.gaze_xy or (self.screen_w / 2, self.screen_h / 2)
+        self.set_crop_active(True)
+        self.crop_by_voice = True
+        self.crop.start_at(x, y)
+        self.log("selection started: look at the opposite corner, then say “capture”")
+
     def command(self, cmd):
-        if cmd == "":
-            if self.crop_active:
-                if self.crop.state == "preview":
-                    self.crop.state = "done"
-                    self.snap(self.crop.rect)
-                else:
-                    self.log("crop: hold on both corners first")
+        if cmd == "start":  # "hey Neon, take a screenshot"
+            self.start_selection()
+        elif cmd == "capture" or (cmd == "" and self.crop_active):  # voice, or Enter in crop mode
+            if self.crop_active and self.crop.has_rect():
+                self.crop.state = "done"
+                self.snap(self.crop.rect)
+            elif self.crop_active:
+                self.log("crop: look at the opposite corner first")
             else:
-                self.snap(self.tracker.current_rect())
+                self.log("say “hey Neon, take a screenshot” to start a selection")
+        elif cmd == "":
+            self.snap(self.tracker.current_rect())
         elif cmd == "c" or (cmd == "cancel" and self.crop_active):
-            self.crop_active = not self.crop_active
-            self.crop.reset()
-            self.overlay.crop = self.crop if self.crop_active else None
+            self.set_crop_active(not self.crop_active)
             self.log("crop mode" if self.crop_active else "box mode")
+        elif cmd == "r" and self.crop_by_voice:
+            self.start_selection()
         elif cmd == "r" and self.crop_active:
             self.crop.reset()
         elif cmd in ("r", "cancel"):
@@ -250,7 +272,8 @@ class GazeSnapApp:
         elif cmd == "q":
             self.app.quit()
         else:
-            print("commands: Enter=snap/save preview  c=crop toggle  r=retry  +/-=resize  p=pause  "
+            print("commands: Enter=snap/save crop  start=new selection at gaze  c=crop toggle  r=retry  "
+                  "+/-=resize  p=pause  "
                   "m=manual/follow  v=voice  n=narration  q=quit", flush=True)
 
     # --- capture ----------------------------------------------------------------
@@ -277,7 +300,9 @@ class GazeSnapApp:
             if self.crop_active:
                 self.crop.state = "preview"
             return
-        if self.crop_active:
+        if self.crop_by_voice:
+            self.set_crop_active(self.args.selection == "crop")  # back to how it was launched
+        elif self.crop_active:
             self.crop.reset()
         if not self.args.no_sound:
             play_shutter()

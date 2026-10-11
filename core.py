@@ -182,6 +182,17 @@ class CropSelector:
         self.candidate = self.started = None
         self.progress = 0.0
 
+    def start_at(self, x, y):
+        """Pin the first corner at (x, y) now (voice start), skipping its dwell."""
+        self.reset()
+        self.anchor = (min(max(x, 0), self.screen_w), min(max(y, 0), self.screen_h))
+        self.state = "second"
+
+    def has_rect(self):
+        """True while dragging or previewing a rectangle big enough to capture."""
+        return (self.state in ("second", "preview") and self.rect is not None
+                and self.rect[2] >= 40 and self.rect[3] >= 40)
+
     def update(self, x, y, t):
         if self.last_t is not None and t - self.last_t > 0.25:
             self.clear_dwell()

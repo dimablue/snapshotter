@@ -16,26 +16,57 @@ def commands(events):
     return [ev for ev in list(events.queue) if ev[0] == 'cmd']
 
 
-def test_voice_only_final_positive_commands():
+def test_voice_acts_on_partials_once_per_sentence():
     events = queue.Queue()
     voice = VoiceControl(events)
-    voice.handle_message({'message_type': 'partial_transcript', 'text': 'take a screenshot'})
-    assert events.empty()
-    voice.handle_message({'message_type': 'committed_transcript', 'text': "don't take a screenshot"})
+    for kind, text in [('partial_transcript', "don't take a"),
+                       ('partial_transcript', "don't take a screenshot"),
+                       ('committed_transcript', "don't take a screenshot")]:
+        voice.handle_message({'message_type': kind, 'text': text})
     assert commands(events) == []
-    assert events.get_nowait() == ('status', 'voice: heard “don\'t take a screenshot” (not a command)')
-    voice.handle_message({'message_type': 'committed_transcript', 'text': 'Take a screenshot, please!'})
-    assert commands(events) == [('cmd', '')]
+    assert list(events.queue)[-1] == ('status', 'voice: heard “don\'t take a screenshot” (not a command)')
     events.queue.clear()
-    voice.handle_message({'message_type': 'committed_transcript', 'text': 'take a screenshot'})
-    assert commands(events) == []  # cooldown
-    assert not is_capture_command('when I say screenshot do something')
+    for kind, text in [('partial_transcript', 'Hey Neon'),
+                       ('partial_transcript', 'Hey Neon, take a screenshot'),  # fires here, not at commit
+                       ('committed_transcript', 'Hey Neon, take a screenshot.'),
+                       ('partial_transcript', 'okay capture'),
+                       ('partial_transcript', 'okay capture that'),
+                       ('committed_transcript', 'Okay, capture that.'),
+                       ('committed_transcript', 'Capture.')]:  # a new sentence fires again
+        voice.handle_message({'message_type': kind, 'text': text})
+    assert commands(events) == [('cmd', 'start'), ('cmd', 'capture'), ('cmd', 'capture')]
+    assert not is_capture_command('when I say cheese do something')
 
 
-def test_voice_crop_commands(monkeypatch):
+def test_commands_anywhere_in_a_sentence():
+    from voice_control import voice_command, commands_in
+    assert voice_command('Okay so now I want you to take a screenshot of this chart') == 'capture'
+    assert commands_in('Capture. Capture. I don\'t know why it takes its time.') == ['capture', 'capture']
+    assert voice_command('hmm, that box is wrong, can we try again?') == 'r'
+    assert voice_command('okay, snap it') == 'capture'
+    assert voice_command('take screenshot') == 'capture'
+    assert voice_command('please cancel crop mode') == 'cancel'
+    assert voice_command("don't take a screenshot") is None
+    assert voice_command('I do not take a screenshot of that') is None
+    assert voice_command("don't capture") is None
+    assert voice_command('I had to cancel the meeting') is None
+    assert commands_in('ok cancel') == ['cancel']
+    assert commands_in('ok cancel', final=False) == []  # lone "cancel"/"retry" wait for the end
+    assert voice_command('take a screenshot, no wait, try again') == 'capture'  # earliest first
+
+
+def test_hey_neon_starts_a_selection():
+    from voice_control import voice_command
+    assert voice_command('Hey Neon, take a screenshot.') == 'start'
+    assert voice_command('okay neon take a screenshot of this') == 'start'
+    assert voice_command('hey neon, screenshot') == 'start'
+    assert voice_command('hey neon cancel') == 'cancel'
+    assert voice_command('hey neon') is None
+    assert voice_command("hey neon don't take a screenshot") is None
+
+
+def test_voice_crop_commands():
     voice = VoiceControl(queue.Queue())
-    times = iter([10.0, 20.0, 30.0])
-    monkeypatch.setattr('voice_control.time.monotonic', lambda: next(times))
     for text in ('Retry.', 'Cancel!', "don't cancel"):
         voice.handle_message({'message_type': 'committed_transcript', 'text': text})
     assert commands(voice.events) == [('cmd', 'r'), ('cmd', 'cancel')]
@@ -69,6 +100,36 @@ def test_crop_saved_by_voice_retry_and_cancel(monkeypatch):
         app.command('cancel')  # "cancel"
         assert not app.crop_active and app.overlay.crop is None
         app.command('cancel')  # ignored outside crop mode
+        assert not app.crop_active
+    finally:
+        app.handle.close()
+        app.resize_handle.close()
+        app.overlay.close()
+
+
+def test_voice_start_drag_capture(monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['gazesnap.py'])
+    app = GazeSnapApp(parse_args())
+    snaps = []
+    monkeypatch.setattr(app, 'snap', snaps.append)
+    try:
+        app.command('capture')  # nothing to capture before "hey Neon"
+        assert snaps == [] and not app.crop_active
+        app.gaze_xy = (100, 120)
+        app.command('start')  # "hey Neon, take a screenshot": first corner at the gaze
+        assert app.crop_active and app.crop.state == 'second' and app.crop.anchor == (100, 120)
+        app.crop.update(130, 130, 1.0)  # too small to capture yet
+        app.command('capture')
+        assert snaps == []
+        app.crop.update(500, 420, 1.1)  # gaze drags the opposite corner
+        app.gaze_xy = (500, 420)
+        app.command('r')  # "retry" re-pins the first corner at the current gaze
+        assert app.crop.anchor == (500, 420) and app.crop.rect is None
+        app.crop.update(200, 150, 1.2)
+        app.command('capture')
+        assert snaps == [(200, 150, 300, 270)]
+        app.crop_by_voice, app.crop.state = False, 'second'
+        app.command('cancel')
         assert not app.crop_active
     finally:
         app.handle.close()
