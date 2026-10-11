@@ -94,7 +94,7 @@ OLD_KEYCHAIN_SERVICE = "gazesnap-elevenlabs"  # the app's earlier name; keys sav
 
 
 def get_api_key():
-    """$ELEVENLABS_API_KEY, else the key saved in the macOS Keychain (see README)."""
+    """$ELEVENLABS_API_KEY, else the macOS Keychain: security add-generic-password -a "$USER" -s snapshotter-elevenlabs -w"""
     key = os.environ.get("ELEVENLABS_API_KEY")
     if key:
         return key

@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
-.README.md
 BUG.png
 .analysis-config.json
 recordings/

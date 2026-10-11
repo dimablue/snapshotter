@@ -5,7 +5,7 @@
 #   tools/background.sh start [snapshotter options]   e.g. start --source neon
 #   tools/background.sh stop | status | log
 #
-# The ElevenLabs key comes from $ELEVENLABS_API_KEY or the macOS Keychain (see README).
+# The ElevenLabs key comes from $ELEVENLABS_API_KEY or the macOS Keychain (service snapshotter-elevenlabs).
 cd "${0:A:h}/.." || exit 1
 LOG=~/Library/Logs/Snapshotter.log
 PIDFILE=~/Library/Caches/snapshotter.pid
