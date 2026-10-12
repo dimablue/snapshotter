@@ -120,29 +120,6 @@ Confirmed drafts are saved as local files (`.ics` for calendar, Markdown for not
 under `~/Pictures/Snapshotter/Items/`. Nothing is sent or published. Image text is treated as
 data, never as instructions.
 
-## Decisions
-
-- **Offline wake word with Vosk** instead of streaming the microphone to the cloud all the time:
-  private, free and fast. ElevenLabs is only used once you've asked for a screenshot.
-- **Vosk also handles "capture"**, so capturing doesn't wait for a network round trip.
-- **Voice to capture, not blinks.** In wake mode only a spoken command captures. Long or double
-  blinks still capture in the other selection modes.
-- **Corners from fixations.** Speech recognition always lags the word, so corners come from where
-  the eyes rested, not where they are when the command arrives.
-- **Open the screenshot in Preview** right after capture, so you see what you got (`--no-open` turns
-  it off).
-- **Full-strength markers.** We tested fainter markers: Pupil still found them at 40% opacity but
-  not at 25%, and a gaze check with faint markers came out worse. So the markers stay solid, but they
-  only appear while a selection is open, and they're hidden for the instant the screenshot is
-  taken, so they never end up in your images.
-- **Pupil Capture over USB instead of the Companion app**, so everything runs on the laptop, with
-  no phone in the loop.
-- **2D calibration, 3D detector off**, because the screen is at a fixed distance and the CPU
-  (Rosetta) can't keep up with both.
-- **Keep the best calibration.** `tools/neon_setup.py save NAME` and `restore NAME` store and reload
-  Pupil's calibration together with the gaze correction, so a good calibration isn't lost.
-- **Drafts stay local.** Actions produce files you can review; nothing acts on your behalf.
-
 ## Working without the hardware
 
 - `tools/record_gaze.py`: records a session against known targets: 25 dots, a moving dot, dots
